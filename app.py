@@ -4,8 +4,8 @@ import calendar
 from ortools.sat.python import cp_model
 
 # 画面設定
-st.set_page_config(page_title="世界最高峰 勤務作成AI V31", layout="wide")
-st.title("🛡️ 究極の勤務作成エンジン (Pro-Mix Optimizer)")
+st.set_page_config(page_title="世界最高峰 勤務作成AI V32", layout="wide")
+st.title("🛡️ 究極の勤務作成エンジン (Hyper-Mix Optimizer)")
 
 # --- サイドバー：基本設定 ---
 with st.sidebar:
@@ -43,7 +43,7 @@ exclude_df = pd.DataFrame(False, index=[d+1 for d in range(num_days)], columns=r
 edited_exclude = st.data_editor(exclude_df, use_container_width=True, key="exclude_editor")
 
 # --- 計算ロジック ---
-if st.button("🚀 勤務表を生成する（混合バランス重視モード）"):
+if st.button("🚀 勤務表を生成する（究極混合バランス・モード）"):
     model = cp_model.CpModel()
     # 0:休, 1:A, 2:B, 3:C, 4:D, 5:E, 6:出
     shifts = {}
@@ -57,7 +57,7 @@ if st.button("🚀 勤務表を生成する（混合バランス重視モード�
     for d in range(num_days):
         wd = calendar.weekday(int(year), int(month), d + 1)
         
-        # 1. 担務充足（ABCDEを必ず誰かがやる）
+        # 1. 担務充足（ABCDEの絶対確保）
         for i in range(1, 6):
             is_excluded = edited_exclude.iloc[d, i-1]
             is_sun_c = (wd == 6 and i == 3)
@@ -66,18 +66,19 @@ if st.button("🚀 勤務表を生成する（混合バランス重視モード�
             if is_excluded or is_sun_c:
                 model.Add(total_on_duty == 0)
             else:
-                is_filled = model.NewBoolVar(f'filled_d{d}_i{i}')
+                # 担務を埋める（最優先）
+                is_filled = model.NewBoolVar(f'f_d{d}_i{i}')
                 model.Add(total_on_duty == 1).OnlyEnforceIf(is_filled)
-                obj_terms.append(is_filled * 10000000)
+                obj_terms.append(is_filled * 50000000)
 
         for s in range(10):
-            # 1日1シフト
+            # 1人1日1シフト
             model.Add(sum(shifts[(s, d, i)] for i in range(7)) == 1)
             
-            # 遅→早禁止
+            # 遅→早禁止（絶対）
             if d < num_days - 1:
-                for late in [4, 5]: # D, E
-                    for early in [1, 2, 3]: # A, B, C
+                for late in [4, 5]:
+                    for early in [1, 2, 3]:
                         model.Add(shifts[(s, d, late)] + shifts[(s, d+1, early)] <= 1)
 
             # 勤務指定の反映
@@ -88,54 +89,57 @@ if st.button("🚀 勤務表を生成する（混合バランス重視モード�
 
     # 個人別・管理者別の高度な制約
     for s in range(10):
-        # 4連勤まで
+        # 4連勤まで（絶対制約）
         for d in range(num_days - 4):
             model.Add(sum((1 - shifts[(s, d+k, 0)]) for k in range(5)) <= 4)
 
-        # 【新導入】シフト混合ロジック
-        # 早番(A,B,C)と遅番(D,E)が入れ替わったら加点
+        # 【究極】シフト混合ロジック（エラー回避版）
+        # 前日と違う「カテゴリー」の仕事をしたら加点する
         for d in range(num_days - 1):
-            is_early_today = model.NewBoolVar(f'is_e_{s}_{d}')
+            is_early_today = model.NewBoolVar(f'ie_{s}_{d}')
             model.Add(sum(shifts[(s, d, i)] for i in [1, 2, 3]) == 1).OnlyEnforceIf(is_early_today)
             
-            is_late_today = model.NewBoolVar(f'is_l_{s}_{d}')
+            is_late_today = model.NewBoolVar(f'il_{s}_{d}')
             model.Add(sum(shifts[(s, d, i)] for i in [4, 5]) == 1).OnlyEnforceIf(is_late_today)
 
-            is_early_tomorrow = model.NewBoolVar(f'is_e_{s}_{d+1}')
+            is_early_tomorrow = model.NewBoolVar(f'ie_{s}_{d+1}')
             model.Add(sum(shifts[(s, d+1, i)] for i in [1, 2, 3]) == 1).OnlyEnforceIf(is_early_tomorrow)
 
-            is_late_tomorrow = model.NewBoolVar(f'is_l_{s}_{d+1}')
+            is_late_tomorrow = model.NewBoolVar(f'il_{s}_{d+1}')
             model.Add(sum(shifts[(s, d+1, i)] for i in [4, 5]) == 1).OnlyEnforceIf(is_late_tomorrow)
 
-            # 「今日早番 且つ 明日遅番」ならボーナス
-            mix_el = model.NewBoolVar(f'mix_el_{s}_{d}')
-            model.AddAll([is_early_today, is_late_tomorrow]).OnlyEnforceIf(mix_el)
-            obj_terms.append(mix_el * 5000)
+            # 「早→遅」への切り替えにボーナス
+            mix_el = model.NewBoolVar(f'mel_{s}_{d}')
+            model.AddBoolAnd([is_early_today, is_late_tomorrow]).OnlyEnforceIf(mix_el)
+            obj_terms.append(mix_el * 10000)
 
-            # 「今日遅番 且つ 明日休み（直後に早番にするための準備）」なら加点
-            off_tomorrow = model.NewBoolVar(f'off_tomorrow_{s}_{d}')
+            # 「遅→休み」への切り替えにボーナス（リズムを整える）
+            off_tomorrow = model.NewBoolVar(f'ot_{s}_{d}')
             model.Add(shifts[(s, d+1, 0)] == 1).OnlyEnforceIf(off_tomorrow)
-            mix_lo = model.NewBoolVar(f'mix_lo_{s}_{d}')
-            model.AddAll([is_late_today, off_tomorrow]).OnlyEnforceIf(mix_lo)
-            obj_terms.append(mix_lo * 2000)
+            mix_lo = model.NewBoolVar(f'mlo_{s}_{d}')
+            model.AddBoolAnd([is_late_today, off_tomorrow]).OnlyEnforceIf(mix_lo)
+            obj_terms.append(mix_lo * 5000)
 
-        # 管理者(1-2)とスタッフ(3-10)
+        # 管理者(1-2)の休日・出勤ルール
         if s < 2:
             for d in range(num_days):
                 if calendar.weekday(int(year), int(month), d+1) >= 5:
-                    model.Add(shifts[(s, d, 0)] == 1) # 土日祝休み
+                    # 管理者は土日祝休みを死守
+                    model.Add(shifts[(s, d, 0)] == 1)
                 else:
-                    model.Add(shifts[(s, d, 0)] == 0) # 平日出勤
+                    # 平日は絶対に「休み」以外（担務優先、なければ「出」）
+                    model.Add(shifts[(s, d, 0)] == 0)
         else:
+            # 一般職は勝手に「出(6)」にならない
             for d in range(num_days):
                 if edited_request.iloc[s, d] != "出":
                     model.Add(shifts[(s, d, 6)] == 0)
 
-        # 公休数死守
+        # 公休数死守（B列）
         actual_hols = sum(shifts[(s, d, 0)] for d in range(num_days))
         h_diff = model.NewIntVar(0, num_days, f'hd_{s}')
         model.AddAbsEquality(h_diff, actual_hols - int(target_hols[s]))
-        obj_terms.append(h_diff * -1000000)
+        obj_terms.append(h_diff * -5000000) # 公休のズレは最強の罰則
 
     model.Maximize(sum(obj_terms))
     solver = cp_model.CpSolver()
@@ -143,7 +147,7 @@ if st.button("🚀 勤務表を生成する（混合バランス重視モード�
     status = solver.Solve(model)
 
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-        st.success("✨ シフトの混合バランスを最適化しました！")
+        st.success("✨ シフトの混合と管理者の公休を最適化しました！")
         res_data = []
         char_map = {0:"休", 1:"A", 2:"B", 3:"C", 4:"D", 5:"E", 6:"出"}
         for s in range(10):
@@ -153,5 +157,6 @@ if st.button("🚀 勤務表を生成する（混合バランス重視モード�
         final_df = pd.DataFrame(res_data, index=staff_names, columns=days_cols)
         final_df["公休計"] = [row.count("休") for row in res_data]
         st.dataframe(final_df.style.applymap(lambda x: 'background-color: #ffcccc' if x=='休' else ('background-color: #e0f0ff' if x=='出' else 'background-color: #ccffcc')), use_container_width=True)
+        st.download_button("📥 結果をCSVで保存", final_df.to_csv().encode('utf-8-sig'), f"roster_{year}_{month}.csv")
     else:
-        st.error("⚠️ 条件が厳しすぎて作成できませんでした。公休数を減らすか、指定を減らしてみてください。")
+        st.error("⚠️ 条件が厳しすぎて作成できません。公休数を1日減らすか、不要設定を1つ外してみてください。")
