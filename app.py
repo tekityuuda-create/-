@@ -3,17 +3,9 @@ import pandas as pd
 import calendar
 from ortools.sat.python import cp_model
 
-# --- バージョンチェックの安全装置 ---
-try:
-    # column_configが存在するかチェック
-    test_config = st.column_config
-except AttributeError:
-    st.error(f"⚠️ Streamlitのバージョンが古いです (現在のバージョン: {st.__version__})")
-    st.info("GitHubの 'requirements.txt' を開き、'streamlit>=1.35.0' と書き換えて保存してください。その後、右下の Manage app から Reboot を実行してください。")
-    st.stop()
-
-st.set_page_config(page_title="世界最高峰 勤務作成AI V29", layout="wide")
-st.title("🛡️ 究極の勤務作成エンジン (Ver. 1.35+ Stable)")
+# 画面設定
+st.set_page_config(page_title="世界最高峰 勤務作成AI V30", layout="wide")
+st.title("🛡️ 究極の勤務作成エンジン (Ultra-Stable Version)")
 
 # --- サイドバー：基本設定 ---
 with st.sidebar:
@@ -28,31 +20,27 @@ with st.sidebar:
         label = f"スタッフ{i+1} ({'管理者' if i < 2 else '一般'})"
         target_hols.append(st.number_input(label, value=9, key=f"hol_{i}"))
 
-# --- カレンダー情報の生成 ---
+# --- カレンダー計算 ---
 _, num_days = calendar.monthrange(int(year), int(month))
 weekdays_ja = ["月", "火", "水", "木", "金", "土", "日"]
 days_cols = [f"{d+1}({weekdays_ja[calendar.weekday(int(year), int(month), d+1)]})" for d in range(num_days)]
 
-# --- メイン画面：勤務指定（プルダウン形式） ---
+# --- メイン画面：勤務指定（プルダウン形式・回避策） ---
 st.subheader("📝 勤務指定・申し込み")
-st.write("セルをクリックして選択してください。")
+st.write("各セルをダブルクリックすると選択肢（休・出・A...）が現れます。")
 
-request_options = ["", "休", "出", "A", "B", "C", "D", "E"]
+# プルダウンの選択肢
+options = ["", "休", "出", "A", "B", "C", "D", "E"]
 
-# 各列にプルダウンを適用
-column_configuration = {}
-for col in days_cols:
-    column_configuration[col] = st.column_config.SelectColumn(
-        label=col,
-        options=request_options,
-        width="small",
-        required=False
-    )
-
+# 【重要】column_configを使わず、データの型を「カテゴリー」にすることでプルダウン化
+# これにより古いバージョンのStreamlitでも確実に動きます
 request_df = pd.DataFrame("", index=staff_names, columns=days_cols)
+for col in days_cols:
+    request_df[col] = pd.Categorical(request_df[col], categories=options)
+
+# 表の表示（configなしの標準エディタ）
 edited_request = st.data_editor(
     request_df, 
-    column_config=column_configuration, 
     use_container_width=True, 
     key="request_editor"
 )
@@ -63,7 +51,7 @@ roles = ["A", "B", "C", "D", "E"]
 exclude_df = pd.DataFrame(False, index=[d+1 for d in range(num_days)], columns=roles)
 edited_exclude = st.data_editor(exclude_df, use_container_width=True, key="exclude_editor")
 
-# --- 計算実行 ---
+# --- 計算ロジック（変更なし、安定版） ---
 if st.button("🚀 勤務表を生成する"):
     model = cp_model.CpModel()
     shifts = {}
@@ -93,7 +81,6 @@ if st.button("🚀 勤務表を生成する"):
         for s in range(10):
             model.Add(sum(shifts[(s, d, i)] for i in range(7)) == 1)
             
-            # 遅→早禁止
             if d < num_days - 1:
                 for late in [4, 5]:
                     for early in [1, 2, 3]:
@@ -101,21 +88,19 @@ if st.button("🚀 勤務表を生成する"):
                         model.Add(shifts[(s, d, late)] + shifts[(s, d+1, early)] <= 1).OnlyEnforceIf(not_le)
                         obj_terms.append(not_le * 100000)
 
-            # 勤務指定の反映
+            # 勤務指定
             req = edited_request.iloc[s, d]
             char_to_id = {"休":0, "A":1, "B":2, "C":3, "D":4, "E":5, "出":6}
             if req in char_to_id:
                 model.Add(shifts[(s, d, char_to_id[req])] == 1)
 
     for s in range(10):
-        # 4連勤制限
         for d in range(num_days - 4):
             no_5c = model.NewBoolVar(f'no5c_s{s}_d{d}')
             model.Add(sum((1 - shifts[(s, d+k, 0)]) for k in range(5)) <= 4).OnlyEnforceIf(no_5c)
             obj_terms.append(no_5c * 50000)
 
-        # 管理者ルール
-        if s < 2:
+        if s < 2: # 管理者
             for d in range(num_days):
                 if calendar.weekday(int(year), int(month), d+1) >= 5:
                     moff = model.NewBoolVar(f'moff_s{s}_d{d}')
@@ -128,7 +113,6 @@ if st.button("🚀 勤務表を生成する"):
                 if edited_request.iloc[s, d] != "出":
                     model.Add(shifts[(s, d, 6)] == 0)
 
-        # 公休数
         actual_hols = sum(shifts[(s, d, 0)] for d in range(num_days))
         h_diff = model.NewIntVar(0, num_days, f'hd_s{s}')
         model.AddAbsEquality(h_diff, actual_hols - int(target_hols[s]))
@@ -147,8 +131,8 @@ if st.button("🚀 勤務表を生成する"):
             row = [char_map[next(i for i in range(7) if solver.Value(shifts[(s, d, i)]) == 1)] for d in range(num_days)]
             res_data.append(row)
         
-        result_df = pd.DataFrame(res_data, index=staff_names, columns=days_cols)
-        result_df["公休計"] = [row.count("休") for row in res_data]
-        st.dataframe(result_df.style.applymap(lambda x: 'background-color: #ffcccc' if x=='休' else ('background-color: #e0f0ff' if x=='出' else 'background-color: #ccffcc')), use_container_width=True)
+        final_df = pd.DataFrame(res_data, index=staff_names, columns=days_cols)
+        final_df["公休計"] = [row.count("休") for row in res_data]
+        st.dataframe(final_df.style.applymap(lambda x: 'background-color: #ffcccc' if x=='休' else ('background-color: #e0f0ff' if x=='出' else 'background-color: #ccffcc')), use_container_width=True)
     else:
-        st.error("⚠️ 計算エラーが発生しました。設定を調整してください。")
+        st.error("⚠️ 計算エラーが発生しました。")
