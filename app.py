@@ -4,8 +4,8 @@ import calendar
 from ortools.sat.python import cp_model
 
 # 画面設定
-st.set_page_config(page_title="世界最高峰 勤務作成AI V32", layout="wide")
-st.title("🛡️ 究極の勤務作成エンジン (Hyper-Mix Optimizer)")
+st.set_page_config(page_title="世界最高峰 勤務作成AI V34", layout="wide")
+st.title("🛡️ 究極の勤務作成エンジン (Flexible Logic Edition)")
 
 # --- サイドバー：基本設定 ---
 with st.sidebar:
@@ -25,12 +25,13 @@ _, num_days = calendar.monthrange(int(year), int(month))
 weekdays_ja = ["月", "火", "水", "木", "金", "土", "日"]
 days_cols = [f"{d+1}({weekdays_ja[calendar.weekday(int(year), int(month), d+1)]})" for d in range(num_days)]
 
-# --- メイン画面：勤務指定（プルダウン形式） ---
+# --- メイン画面：勤務指定 ---
 st.subheader("📝 勤務指定・申し込み")
 st.write("各セルをダブルクリックして「休・出・A-E」を選択してください。")
 
 options = ["", "休", "出", "A", "B", "C", "D", "E"]
 request_df = pd.DataFrame("", index=staff_names, columns=days_cols)
+# カテゴリー型にしてプルダウン化（古いStreamlit対策）
 for col in days_cols:
     request_df[col] = pd.Categorical(request_df[col], categories=options)
 
@@ -43,7 +44,7 @@ exclude_df = pd.DataFrame(False, index=[d+1 for d in range(num_days)], columns=r
 edited_exclude = st.data_editor(exclude_df, use_container_width=True, key="exclude_editor")
 
 # --- 計算ロジック ---
-if st.button("🚀 勤務表を生成する（究極混合バランス・モード）"):
+if st.button("🚀 勤務表を生成する（究極の柔軟性・モード）"):
     model = cp_model.CpModel()
     # 0:休, 1:A, 2:B, 3:C, 4:D, 5:E, 6:出
     shifts = {}
@@ -54,10 +55,11 @@ if st.button("🚀 勤務表を生成する（究極混合バランス・モー�
 
     obj_terms = []
 
+    # --- 日ごとの制約 ---
     for d in range(num_days):
         wd = calendar.weekday(int(year), int(month), d + 1)
         
-        # 1. 担務充足（ABCDEの絶対確保）
+        # 1. 役割充足（ABCDEを埋める）
         for i in range(1, 6):
             is_excluded = edited_exclude.iloc[d, i-1]
             is_sun_c = (wd == 6 and i == 3)
@@ -66,10 +68,11 @@ if st.button("🚀 勤務表を生成する（究極混合バランス・モー�
             if is_excluded or is_sun_c:
                 model.Add(total_on_duty == 0)
             else:
-                # 担務を埋める（最優先）
+                # 担務を埋める（最優先：1億点）
+                # 管理者が入ってでも埋めるように重み付け
                 is_filled = model.NewBoolVar(f'f_d{d}_i{i}')
                 model.Add(total_on_duty == 1).OnlyEnforceIf(is_filled)
-                obj_terms.append(is_filled * 50000000)
+                obj_terms.append(is_filled * 100000000)
 
         for s in range(10):
             # 1人1日1シフト
@@ -87,67 +90,61 @@ if st.button("🚀 勤務表を生成する（究極混合バランス・モー�
             if req in char_to_id:
                 model.Add(shifts[(s, d, char_to_id[req])] == 1)
 
-    # 個人別・管理者別の高度な制約
+    # --- 個人別・高度な制約 ---
     for s in range(10):
-        # 4連勤まで（絶対制約）
+        # 4連勤まで（5連勤以上を絶対禁止）
         for d in range(num_days - 4):
             model.Add(sum((1 - shifts[(s, d+k, 0)]) for k in range(5)) <= 4)
 
-        # 【究極】シフト混合ロジック（エラー回避版）
-        # 前日と違う「カテゴリー」の仕事をしたら加点する
-        for d in range(num_days - 1):
-            is_early_today = model.NewBoolVar(f'ie_{s}_{d}')
-            model.Add(sum(shifts[(s, d, i)] for i in [1, 2, 3]) == 1).OnlyEnforceIf(is_early_today)
-            
-            is_late_today = model.NewBoolVar(f'il_{s}_{d}')
-            model.Add(sum(shifts[(s, d, i)] for i in [4, 5]) == 1).OnlyEnforceIf(is_late_today)
-
-            is_early_tomorrow = model.NewBoolVar(f'ie_{s}_{d+1}')
-            model.Add(sum(shifts[(s, d+1, i)] for i in [1, 2, 3]) == 1).OnlyEnforceIf(is_early_tomorrow)
-
-            is_late_tomorrow = model.NewBoolVar(f'il_{s}_{d+1}')
-            model.Add(sum(shifts[(s, d+1, i)] for i in [4, 5]) == 1).OnlyEnforceIf(is_late_tomorrow)
-
-            # 「早→遅」への切り替えにボーナス
-            mix_el = model.NewBoolVar(f'mel_{s}_{d}')
-            model.AddBoolAnd([is_early_today, is_late_tomorrow]).OnlyEnforceIf(mix_el)
-            obj_terms.append(mix_el * 10000)
-
-            # 「遅→休み」への切り替えにボーナス（リズムを整える）
-            off_tomorrow = model.NewBoolVar(f'ot_{s}_{d}')
-            model.Add(shifts[(s, d+1, 0)] == 1).OnlyEnforceIf(off_tomorrow)
-            mix_lo = model.NewBoolVar(f'mlo_{s}_{d}')
-            model.AddBoolAnd([is_late_today, off_tomorrow]).OnlyEnforceIf(mix_lo)
-            obj_terms.append(mix_lo * 5000)
-
-        # 管理者(1-2)の休日・出勤ルール
+        # 管理者(1-2)の努力目標
         if s < 2:
             for d in range(num_days):
-                if calendar.weekday(int(year), int(month), d+1) >= 5:
-                    # 管理者は土日祝休みを死守
-                    model.Add(shifts[(s, d, 0)] == 1)
+                wd = calendar.weekday(int(year), int(month), d+1)
+                # 土日祝休み（努力目標：100万点）
+                if wd >= 5: 
+                    is_mgr_off = model.NewBoolVar(f'mgr_off_{s}_{d}')
+                    model.Add(shifts[(s, d, 0)] == 1).OnlyEnforceIf(is_mgr_off)
+                    obj_terms.append(is_mgr_off * 1000000)
                 else:
-                    # 平日は絶対に「休み」以外（担務優先、なければ「出」）
-                    model.Add(shifts[(s, d, 0)] == 0)
+                    # 平日出勤（努力目標：100万点）
+                    is_mgr_work = model.NewBoolVar(f'mgr_work_{s}_{d}')
+                    model.Add(shifts[(s, d, 0)] == 0).OnlyEnforceIf(is_mgr_work)
+                    obj_terms.append(is_mgr_work * 1000000)
         else:
-            # 一般職は勝手に「出(6)」にならない
+            # 一般職：指定なき「出(6)」禁止
             for d in range(num_days):
                 if edited_request.iloc[s, d] != "出":
                     model.Add(shifts[(s, d, 6)] == 0)
 
-        # 公休数死守（B列）
+        # 【混合ボーナス】早遅のリズム
+        for d in range(num_days - 1):
+            is_e_today = model.NewBoolVar(f'ie_{s}_{d}')
+            model.Add(sum(shifts[(s, d, i)] for i in [1, 2, 3]) == 1).OnlyEnforceIf(is_e_today)
+            is_l_tomorrow = model.NewBoolVar(f'ilt_{s}_{d}')
+            model.Add(sum(shifts[(s, d+1, i)] for i in [4, 5]) == 1).OnlyEnforceIf(is_l_tomorrow)
+
+            mix_el = model.NewBoolVar(f'mix_{s}_{d}')
+            model.AddBoolAnd([is_e_today, is_l_tomorrow]).OnlyEnforceIf(mix_el)
+            obj_terms.append(mix_el * 10000)
+
+        # 【重要】公休数（B列）の柔軟な判定
         actual_hols = sum(shifts[(s, d, 0)] for d in range(num_days))
-        h_diff = model.NewIntVar(0, num_days, f'hd_{s}')
-        model.AddAbsEquality(h_diff, actual_hols - int(target_hols[s]))
-        obj_terms.append(h_diff * -5000000) # 公休のズレは最強の罰則
+        # 1日程度のズレを許容するための制約
+        model.Add(actual_hols >= int(target_hols[s]) - 1)
+        model.Add(actual_hols <= int(target_hols[s]) + 1)
+        
+        # ぴったりだと高得点（1,000万点）
+        is_exact_hols = model.NewBoolVar(f'exact_hols_{s}')
+        model.Add(actual_hols == int(target_hols[s])).OnlyEnforceIf(is_exact_hols)
+        obj_terms.append(is_exact_hols * 10000000)
 
     model.Maximize(sum(obj_terms))
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 30.0
+    solver.parameters.max_time_in_seconds = 20.0 # 20秒制限
     status = solver.Solve(model)
 
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-        st.success("✨ シフトの混合と管理者の公休を最適化しました！")
+        st.success("✨ 1日程度の公休ズレを許容し、最適な勤務表を作成しました。")
         res_data = []
         char_map = {0:"休", 1:"A", 2:"B", 3:"C", 4:"D", 5:"E", 6:"出"}
         for s in range(10):
@@ -159,4 +156,4 @@ if st.button("🚀 勤務表を生成する（究極混合バランス・モー�
         st.dataframe(final_df.style.applymap(lambda x: 'background-color: #ffcccc' if x=='休' else ('background-color: #e0f0ff' if x=='出' else 'background-color: #ccffcc')), use_container_width=True)
         st.download_button("📥 結果をCSVで保存", final_df.to_csv().encode('utf-8-sig'), f"roster_{year}_{month}.csv")
     else:
-        st.error("⚠️ 条件が厳しすぎて作成できません。公休数を1日減らすか、不要設定を1つ外してみてください。")
+        st.error("⚠️ 条件を緩和しても計算できませんでした。公休数を全員8日〜9日程度に調整してください。")
