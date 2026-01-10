@@ -4,7 +4,7 @@ import calendar
 from ortools.sat.python import cp_model
 
 # 画面設定
-st.set_page_config(page_title="世界最高峰 勤務作成AI 究極安定版", layout="wide")
+st.set_page_config(page_title="勤務作成AI 安定版", layout="wide")
 st.title("🛡️ 究極の勤務作成エンジン (Stability Resolver V42)")
 
 # --- サイドバー：詳細設定 ---
@@ -158,3 +158,4 @@ if st.button("🚀 勤務表を生成する"):
         st.download_button("📥 結果をダウンロード", final_df.to_csv().encode('utf-8-sig'), "roster.csv")
     else:
         st.error("⚠️ 致命的なエラー：解が見つかりませんでした。")
+
