@@ -4,8 +4,8 @@ import calendar
 from ortools.sat.python import cp_model
 
 # 画面設定
-st.set_page_config(page_title="世界最高峰 勤務作成AI 究極バランス版", layout="wide")
-st.title("🛡️ 究極の勤務作成エンジン (Consecutive Off Control)")
+st.set_page_config(page_title="世界最高峰 勤務作成AI 密度最適化版", layout="wide")
+st.title("🛡️ 究極の勤務作成エンジン (High Density Optimizer)")
 
 # --- サイドバー：詳細設定 ---
 with st.sidebar:
@@ -28,7 +28,7 @@ with st.sidebar:
     month = st.number_input("月", min_value=1, max_value=12, value=1, step=1)
     
     st.header("👤 公休数設定")
-    staff_names = [f"スタッフ{i+1}({'管理者' if i < num_mgr else '一般'})" for i in range(total_staff)]
+    staff_names = [f"スタッフ{i+1}({'管理者' if i < 2 else '一般'})" for i in range(total_staff)]
     target_hols = [st.number_input(f"{name} の公休", value=9, key=f"hol_{i}") for i, name in enumerate(staff_names)]
 
 # --- カレンダー計算 ---
@@ -50,7 +50,7 @@ exclude_df = pd.DataFrame(False, index=[d+1 for d in range(num_days)], columns=u
 edited_exclude = st.data_editor(exclude_df, use_container_width=True, key="exclude_editor")
 
 # --- 計算ロジック ---
-if st.button("🚀 勤務表を生成する（連休バランス最適化）"):
+if st.button("🚀 勤務表を生成する（連休抑制モード）"):
     model = cp_model.CpModel()
     S_OFF, S_WORK = 0, num_user_shifts + 1
     shifts = {(s, d, i): model.NewBoolVar(f's{s}d{d}i{i}') for s in range(total_staff) for d in range(num_days) for i in range(num_user_shifts + 2)}
@@ -82,9 +82,8 @@ if st.button("🚀 勤務表を生成する（連休バランス最適化）"):
             if d < num_days - 1:
                 for l_id in late_ids:
                     for e_id in early_ids:
-                        nle = model.NewBoolVar(f'nle_{s}_{d}_{l_id}_{e_id}')
-                        model.Add(shifts[(s, d, l_id)] + shifts[(s, d+1, e_id)] <= 1).OnlyEnforceIf(nle)
-                        obj_terms.append(nle * 10000000)
+                        model.Add(shifts[(s, d, l_id)] + shifts[(s, d+1, e_id)] <= 1)
+            
             # 勤務指定
             req = edited_request.iloc[s, d]
             if req in options and req != "":
@@ -92,57 +91,62 @@ if st.button("🚀 勤務表を生成する（連休バランス最適化）"):
                 if rid is not None: model.Add(shifts[(s, d, rid)] == 1)
 
     for s in range(total_staff):
-        # 4連勤まで（絶対目標）
+        # 4連勤まで（5連勤禁止）
         for d in range(num_days - 4):
-            n5c = model.NewBoolVar(f'n5c_{s}_{d}')
-            model.Add(sum((1 - shifts[(s, d+k, S_OFF)]) for k in range(5)) <= 4).OnlyEnforceIf(n5c)
-            obj_terms.append(n5c * 5000000)
+            model.Add(sum((1 - shifts[(s, d+k, S_OFF)]) for k in range(5)) <= 4)
 
-        # 【新導入】連休コントロールロジック
+        # 【究極の連休コントロール】
         for d in range(num_days - 1):
-            # 2連休の推奨 (休 -> 休 への遷移に加点)
-            is_consec_off = model.NewBoolVar(f'c_off_{s}_{d}')
-            model.AddBoolAnd([shifts[(s, d, S_OFF)], shifts[(s, d+1, S_OFF)]]).OnlyEnforceIf(is_consec_off)
-            obj_terms.append(is_consec_off * 50000) # 2連休は嬉しい（5万点）
+            # 2連休はボーナスを廃止し、むしろ「たまに」にするためにコストを微調整
+            is_2off = model.NewBoolVar(f'2off_{s}_{d}')
+            model.AddBoolAnd([shifts[(s, d, S_OFF)], shifts[(s, d+1, S_OFF)]]).OnlyEnforceIf(is_2off)
+            # 2連休自体には加点しない（他のルールで必要なら発生する）
 
-            # 3連休以上の抑制
+            # 3連休の厳罰化
             if d < num_days - 2:
-                # 3日連続休みかどうか
                 is_3off = model.NewBoolVar(f'3off_{s}_{d}')
                 model.AddBoolAnd([shifts[(s, d, S_OFF)], shifts[(s, d+1, S_OFF)], shifts[(s, d+2, S_OFF)]]).OnlyEnforceIf(is_3off)
-                
-                # 申し込み（指定）があるかチェック
-                reqs = [edited_request.iloc[s, d], edited_request.iloc[s, d+1], edited_request.iloc[s, d+2]]
-                has_req_off = "休" in reqs
-                
-                if not has_req_off:
-                    # 申し込みがないのに3連休になったら猛烈な減点
-                    obj_terms.append(is_3off * -10000000)
+                # 申し込み以外の3連休を重罰
+                if not ("休" in [edited_request.iloc[s, d], edited_request.iloc[s, d+1], edited_request.iloc[s, d+2]]):
+                    obj_terms.append(is_3off * -5000000)
 
+            # 4連休以上の絶対禁止
+            if d < num_days - 3:
+                is_4off = model.NewBoolVar(f'4off_{s}_{d}')
+                model.AddBoolAnd([shifts[(s, d+k, S_OFF)] for k in range(4)]).OnlyEnforceIf(is_4off)
+                if not ("休" in [edited_request.iloc[s, d+k] for k in range(4)]):
+                    obj_terms.append(is_4off * -20000000) # ほぼ不可能な減点
+
+        # 管理者の振る舞い (管理者は基本「出」)
         if s < num_mgr:
             for d in range(num_days):
                 wd = calendar.weekday(int(year), int(month), d+1)
                 m_goal = model.NewBoolVar(f'mg_{s}_{d}')
-                if wd >= 5: model.Add(shifts[(s, d, S_OFF)] == 1).OnlyEnforceIf(m_goal)
-                else: model.Add(shifts[(s, d, S_OFF)] == 0).OnlyEnforceIf(m_goal)
-                obj_terms.append(m_goal * 1000000)
+                if wd >= 5: # 土日は休みを優先目標に
+                    model.Add(shifts[(s, d, S_OFF)] == 1).OnlyEnforceIf(m_goal)
+                    obj_terms.append(m_goal * 1000000)
+                else: # 平日は休みを禁止（担務か出）
+                    model.Add(shifts[(s, d, S_OFF)] == 0)
         else:
+            # 一般職：指定なき「出」禁止
             for d in range(num_days):
                 if edited_request.iloc[s, d] != "出": model.Add(shifts[(s, d, S_WORK)] == 0)
 
-        # 公休数死守
+        # 公休数死守（±1日のズレを許容、ピッタリを最優先）
         actual_hols = sum(shifts[(s, d, S_OFF)] for d in range(num_days))
-        h_diff = model.NewIntVar(0, num_days, f'hd_{s}')
-        model.AddAbsEquality(h_diff, actual_hols - int(target_hols[s]))
-        obj_terms.append(h_diff * -10000000)
+        model.Add(actual_hols >= int(target_hols[s]) - 1)
+        model.Add(actual_hols <= int(target_hols[s]) + 1)
+        is_exact = model.NewBoolVar(f'exact_{s}')
+        model.Add(actual_hols == int(target_hols[s])).OnlyEnforceIf(is_exact)
+        obj_terms.append(is_exact * 10000000)
 
     model.Maximize(sum(obj_terms))
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 20.0
+    solver.parameters.max_time_in_seconds = 30.0
     status = solver.Solve(model)
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        st.success("✨ 連休バランスを調整し、最適な勤務表を生成しました！")
+        st.success("✨ 連休を抑制し、密度を重視した勤務表を生成しました！")
         res_data = []
         char_map = {S_OFF: "休", S_WORK: "出"}
         for idx, name in enumerate(user_shifts): char_map[idx + 1] = name
@@ -152,5 +156,5 @@ if st.button("🚀 勤務表を生成する（連休バランス最適化）"):
         final_df = pd.DataFrame(res_data, index=staff_names, columns=days_cols)
         final_df["公休計"] = [row.count("休") for row in res_data]
         st.dataframe(final_df.style.applymap(lambda x: 'background-color: #ffcccc' if x=="休" else ('background-color: #e0f0ff' if x=="出" else 'background-color: #ccffcc')), use_container_width=True)
-        st.download_button("📥 CSV保存", final_df.to_csv().encode('utf-8-sig'), f"roster.csv")
-    else: st.error("⚠️ 条件が厳しすぎます。")
+        st.download_button("📥 CSV保存", final_df.to_csv().encode('utf-8-sig'), "roster.csv")
+    else: st.error("⚠️ 条件が厳しすぎます。公休数を調整してください。")
