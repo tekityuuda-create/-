@@ -4,13 +4,13 @@ import calendar
 from ortools.sat.python import cp_model
 
 # 画面設定
-st.set_page_config(page_title="世界最高峰 勤務作成AI 究極柔軟版", layout="wide")
-st.title("🛡️ 究極の勤務作成エンジン (Ultra-Flexible Optimizer)")
+st.set_page_config(page_title="世界最高峰 勤務作成AI 究極バランス版", layout="wide")
+st.title("🛡️ 究極の勤務作成エンジン (Consecutive Off Control)")
 
 # --- サイドバー：詳細設定 ---
 with st.sidebar:
     st.header("⚙️ システム構成")
-    num_mgr = st.number_input("管理者の人数 (上からN名)", min_value=0, max_value=5, value=2)
+    num_mgr = st.number_input("管理者の人数", min_value=0, max_value=5, value=2)
     num_regular = st.number_input("一般スタッフの人数", min_value=1, max_value=15, value=8)
     total_staff = num_mgr + num_regular
     
@@ -50,7 +50,7 @@ exclude_df = pd.DataFrame(False, index=[d+1 for d in range(num_days)], columns=u
 edited_exclude = st.data_editor(exclude_df, use_container_width=True, key="exclude_editor")
 
 # --- 計算ロジック ---
-if st.button("🚀 勤務表を生成する"):
+if st.button("🚀 勤務表を生成する（連休バランス最適化）"):
     model = cp_model.CpModel()
     S_OFF, S_WORK = 0, num_user_shifts + 1
     shifts = {(s, d, i): model.NewBoolVar(f's{s}d{d}i{i}') for s in range(total_staff) for d in range(num_days) for i in range(num_user_shifts + 2)}
@@ -72,14 +72,13 @@ if st.button("🚀 勤務表を生成する"):
             if is_excluded or is_sun_c:
                 model.Add(total_on_duty == 0)
             else:
-                # 担務充足を強力な努力目標に（1億点）
                 f = model.NewBoolVar(f'f_d{d}_s{s_id}')
                 model.Add(total_on_duty == 1).OnlyEnforceIf(f)
-                obj_terms.append(f * 100000000)
+                obj_terms.append(f * 100000000) # 担務充足最優先
 
         for s in range(total_staff):
             model.Add(sum(shifts[(s, d, i)] for i in range(num_user_shifts + 2)) == 1)
-            # 遅→早禁止 (強力な努力目標：1,000万点)
+            # 遅→早禁止
             if d < num_days - 1:
                 for l_id in late_ids:
                     for e_id in early_ids:
@@ -93,16 +92,36 @@ if st.button("🚀 勤務表を生成する"):
                 if rid is not None: model.Add(shifts[(s, d, rid)] == 1)
 
     for s in range(total_staff):
-        # 5連勤禁止 (強力な努力目標：500万点)
+        # 4連勤まで（絶対目標）
         for d in range(num_days - 4):
             n5c = model.NewBoolVar(f'n5c_{s}_{d}')
             model.Add(sum((1 - shifts[(s, d+k, S_OFF)]) for k in range(5)) <= 4).OnlyEnforceIf(n5c)
             obj_terms.append(n5c * 5000000)
 
+        # 【新導入】連休コントロールロジック
+        for d in range(num_days - 1):
+            # 2連休の推奨 (休 -> 休 への遷移に加点)
+            is_consec_off = model.NewBoolVar(f'c_off_{s}_{d}')
+            model.AddBoolAnd([shifts[(s, d, S_OFF)], shifts[(s, d+1, S_OFF)]]).OnlyEnforceIf(is_consec_off)
+            obj_terms.append(is_consec_off * 50000) # 2連休は嬉しい（5万点）
+
+            # 3連休以上の抑制
+            if d < num_days - 2:
+                # 3日連続休みかどうか
+                is_3off = model.NewBoolVar(f'3off_{s}_{d}')
+                model.AddBoolAnd([shifts[(s, d, S_OFF)], shifts[(s, d+1, S_OFF)], shifts[(s, d+2, S_OFF)]]).OnlyEnforceIf(is_3off)
+                
+                # 申し込み（指定）があるかチェック
+                reqs = [edited_request.iloc[s, d], edited_request.iloc[s, d+1], edited_request.iloc[s, d+2]]
+                has_req_off = "休" in reqs
+                
+                if not has_req_off:
+                    # 申し込みがないのに3連休になったら猛烈な減点
+                    obj_terms.append(is_3off * -10000000)
+
         if s < num_mgr:
             for d in range(num_days):
                 wd = calendar.weekday(int(year), int(month), d+1)
-                # 管理者土日祝休み / 平日出勤 (努力目標：100万点)
                 m_goal = model.NewBoolVar(f'mg_{s}_{d}')
                 if wd >= 5: model.Add(shifts[(s, d, S_OFF)] == 1).OnlyEnforceIf(m_goal)
                 else: model.Add(shifts[(s, d, S_OFF)] == 0).OnlyEnforceIf(m_goal)
@@ -111,11 +130,11 @@ if st.button("🚀 勤務表を生成する"):
             for d in range(num_days):
                 if edited_request.iloc[s, d] != "出": model.Add(shifts[(s, d, S_WORK)] == 0)
 
-        # 公休数死守 (強力な努力目標)
+        # 公休数死守
         actual_hols = sum(shifts[(s, d, S_OFF)] for d in range(num_days))
         h_diff = model.NewIntVar(0, num_days, f'hd_{s}')
         model.AddAbsEquality(h_diff, actual_hols - int(target_hols[s]))
-        obj_terms.append(h_diff * -10000000) # 1日ズレるごとに1,000万点マイナス
+        obj_terms.append(h_diff * -10000000)
 
     model.Maximize(sum(obj_terms))
     solver = cp_model.CpSolver()
@@ -123,7 +142,7 @@ if st.button("🚀 勤務表を生成する"):
     status = solver.Solve(model)
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        st.success("✨ 最適な勤務表を抽出しました。")
+        st.success("✨ 連休バランスを調整し、最適な勤務表を生成しました！")
         res_data = []
         char_map = {S_OFF: "休", S_WORK: "出"}
         for idx, name in enumerate(user_shifts): char_map[idx + 1] = name
@@ -133,5 +152,5 @@ if st.button("🚀 勤務表を生成する"):
         final_df = pd.DataFrame(res_data, index=staff_names, columns=days_cols)
         final_df["公休計"] = [row.count("休") for row in res_data]
         st.dataframe(final_df.style.applymap(lambda x: 'background-color: #ffcccc' if x=="休" else ('background-color: #e0f0ff' if x=="出" else 'background-color: #ccffcc')), use_container_width=True)
-        st.download_button("📥 CSV保存", final_df.to_csv().encode('utf-8-sig'), "roster.csv")
-    else: st.error("⚠️ 致命的な矛盾があります。設定を見直してください。")
+        st.download_button("📥 CSV保存", final_df.to_csv().encode('utf-8-sig'), f"roster.csv")
+    else: st.error("⚠️ 条件が厳しすぎます。")
