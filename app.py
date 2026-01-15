@@ -5,7 +5,7 @@ from ortools.sat.python import cp_model
 
 # --- 画面設定 ---
 st.set_page_config(
-    page_title="世界最高峰 勤務作成AI 究極版", 
+    page_title="勤務作成AI", 
     page_icon="📅", # ここに icon.png と書けば自作画像になります
     layout="wide"
 )
@@ -171,3 +171,4 @@ if st.button("🚀 勤務表を生成する"):
         st.download_button("📥 CSV保存", final_df.to_csv().encode('utf-8-sig'), f"roster_{year}_{month}.csv")
     else:
         st.error("⚠️ 解が見つかりませんでした。設定を確認してください。")
+
