@@ -3,9 +3,13 @@ import pandas as pd
 import calendar
 from ortools.sat.python import cp_model
 
-# 画面設定
-st.set_page_config(page_title="勤務作成AI 安定版", layout="wide")
-st.title("🛡️ 勤務作成エンジン (Stability Resolver V42)")
+# --- 画面設定 ---
+st.set_page_config(
+    page_title="世界最高峰 勤務作成AI 究極版", 
+    page_icon="📅", # ここに icon.png と書けば自作画像になります
+    layout="wide"
+)
+st.title("🛡️ 究極の勤務作成エンジン (Ultimate Resolver V43)")
 
 # --- サイドバー：詳細設定 ---
 with st.sidebar:
@@ -38,7 +42,8 @@ days_cols = [f"{d+1}({weekdays_ja[calendar.weekday(int(year), int(month), d+1)]}
 
 # --- メイン画面：勤務指定 ---
 st.subheader("📝 勤務指定・申し込み")
-options = ["", "休", "出"] + user_shifts
+# 【修正ポイント】「出」を「日」に変更
+options = ["", "休", "日"] + user_shifts
 request_df = pd.DataFrame("", index=staff_names, columns=days_cols)
 for col in days_cols:
     request_df[col] = pd.Categorical(request_df[col], categories=options)
@@ -52,8 +57,8 @@ edited_exclude = st.data_editor(exclude_df, use_container_width=True, key="exclu
 # --- 計算ロジック ---
 if st.button("🚀 勤務表を生成する"):
     model = cp_model.CpModel()
-    # 0:休, 1~N:ユーザー勤務, N+1:出(WORK)
-    S_OFF, S_WORK = 0, num_user_shifts + 1
+    # 0:休, 1~N:ユーザー勤務, N+1:日(NIKKIN)
+    S_OFF, S_NIKKIN = 0, num_user_shifts + 1
     shifts = {(s, d, i): model.NewBoolVar(f's{s}d{d}i{i}') for s in range(total_staff) for d in range(num_days) for i in range(num_user_shifts + 2)}
     obj_terms = []
 
@@ -72,16 +77,15 @@ if st.button("🚀 勤務表を生成する"):
             if is_excluded or is_sun_c:
                 model.Add(total_on_duty == 0)
             else:
-                # 担務充足（最優先。欠員1件につき-1億点）
+                # 担務充足（最優先：1億点）
                 filled = model.NewBoolVar(f'f_d{d}_s{s_id}')
                 model.Add(total_on_duty == 1).OnlyEnforceIf(filled)
                 obj_terms.append(filled * 100000000)
 
         for s in range(total_staff):
-            # 基本：1人1日1シフト
             model.Add(sum(shifts[(s, d, i)] for i in range(num_user_shifts + 2)) == 1)
             
-            # 2. 遅→早禁止 (ペナルティ化して柔軟に解決。1件につき-1000万点)
+            # 2. 遅→早禁止 (1000万点)
             if d < num_days - 1:
                 for l_id in late_ids:
                     for e_id in early_ids:
@@ -92,22 +96,22 @@ if st.button("🚀 勤務表を生成する"):
             # 3. 勤務指定
             req = edited_request.iloc[s, d]
             if req in options and req != "":
-                rid = {"休":0, "出":S_WORK}.get(req, user_shifts.index(req)+1 if req in user_shifts else None)
-                if rid is not None: model.Add(shifts[(s, d, rid)] == 1)
+                if req == "休": rid = S_OFF
+                elif req == "日": rid = S_NIKKIN
+                else: rid = user_shifts.index(req) + 1
+                model.Add(shifts[(s, d, rid)] == 1)
 
     for s in range(total_staff):
-        # 4. 連勤制限（5連勤以上を極めて重いペナルティに。-500万点）
+        # 4. 連勤制限（5連勤以上を抑制：-500万点）
         for d in range(num_days - 4):
             n5c = model.NewBoolVar(f'n5c_{s}_{d}')
             model.Add(sum((1 - shifts[(s, d+k, S_OFF)]) for k in range(5)) <= 4).OnlyEnforceIf(n5c)
             obj_terms.append(n5c * 5000000)
 
-        # 5. 連休制限（申し込みなしの3連休以上にペナルティ。-200万点）
+        # 5. 連休制限（申し込みなしの3連休以上に抑制：-200万点）
         for d in range(num_days - 2):
             is_3off = model.NewBoolVar(f'3off_{s}_{d}')
             model.AddBoolAnd([shifts[(s, d, S_OFF)], shifts[(s, d+1, S_OFF)], shifts[(s, d+2, S_OFF)]]).OnlyEnforceIf(is_3off)
-            
-            # 申し込みがあるか判定
             req_off = any(edited_request.iloc[s, d+k] == "休" for k in range(3))
             if not req_off:
                 obj_terms.append(is_3off * -2000000)
@@ -116,28 +120,29 @@ if st.button("🚀 勤務表を生成する"):
         if s < num_mgr:
             for d in range(num_days):
                 wd = calendar.weekday(int(year), int(month), d+1)
-                # 平日の管理者休みは強いペナルティ (-100万点)
+                # 管理者は平日は原則出勤 (日勤または担務)
                 if wd < 5:
                     m_work = model.NewBoolVar(f'mw_{s}_{d}')
                     model.Add(shifts[(s, d, S_OFF)] == 0).OnlyEnforceIf(m_work)
                     obj_terms.append(m_work * 1000000)
                 else:
-                    # 土日は休みを推奨 (+50万点)
+                    # 土日は休みを優先
                     m_off = model.NewBoolVar(f'mo_{s}_{d}')
                     model.Add(shifts[(s, d, S_OFF)] == 1).OnlyEnforceIf(m_off)
                     obj_terms.append(m_off * 500000)
         else:
-            # 一般職の勝手な「出」は絶対禁止
+            # 一般職：指定なき「日」は絶対禁止（バックアップは管理者の役目）
             for d in range(num_days):
-                if edited_request.iloc[s, d] != "出":
-                    model.Add(shifts[(s, d, S_WORK)] == 0)
+                if edited_request.iloc[s, d] != "日":
+                    model.Add(shifts[(s, d, S_NIKKIN)] == 0)
 
-        # 7. 公休数 (B列)
-        # 絶対制約ではなく「1日のズレにつき-1000万点」にすることで、デッドロックを回避
+        # 7. 公休数 (B列) 1日のズレを許容しつつ最適化
         actual_hols = sum(shifts[(s, d, S_OFF)] for d in range(num_days))
-        h_diff = model.NewIntVar(0, num_days, f'hd_{s}')
-        model.AddAbsEquality(h_diff, actual_hols - int(target_hols[s]))
-        obj_terms.append(h_diff * -10000000)
+        model.Add(actual_hols >= int(target_hols[s]) - 1)
+        model.Add(actual_hols <= int(target_hols[s]) + 1)
+        is_exact = model.NewBoolVar(f'exact_{s}')
+        model.Add(actual_hols == int(target_hols[s])).OnlyEnforceIf(is_exact)
+        obj_terms.append(is_exact * 10000000)
 
     model.Maximize(sum(obj_terms))
     solver = cp_model.CpSolver()
@@ -145,18 +150,24 @@ if st.button("🚀 勤務表を生成する"):
     status = solver.Solve(model)
 
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-        st.success("✨ 可能な限りすべての条件を満たした最適な勤務表を作成しました。")
+        st.success("✨ 条件を最適化し『日勤(日)』を含む勤務表を生成しました！")
         res_data = []
-        char_map = {S_OFF: "休", S_WORK: "出"}
+        char_map = {S_OFF: "休", S_NIKKIN: "日"}
         for idx, name in enumerate(user_shifts): char_map[idx + 1] = name
         for s in range(total_staff):
             row = [char_map[next(i for i in range(num_user_shifts + 2) if solver.Value(shifts[(s, d, i)]) == 1)] for d in range(num_days)]
             res_data.append(row)
+        
         final_df = pd.DataFrame(res_data, index=staff_names, columns=days_cols)
         final_df["公休計"] = [row.count("休") for row in res_data]
-        st.dataframe(final_df.style.applymap(lambda x: 'background-color: #ffcccc' if x=="休" else ('background-color: #e0f0ff' if x=="出" else 'background-color: #ccffcc')), use_container_width=True)
-        st.download_button("📥 結果をダウンロード", final_df.to_csv().encode('utf-8-sig'), "roster.csv")
+        
+        def style_cells(val):
+            if val == "休": return 'background-color: #ffcccc'
+            if val == "日": return 'background-color: #e0f0ff'
+            if val in user_shifts: return 'background-color: #ccffcc'
+            return ''
+
+        st.dataframe(final_df.style.applymap(style_cells), use_container_width=True)
+        st.download_button("📥 CSV保存", final_df.to_csv().encode('utf-8-sig'), f"roster_{year}_{month}.csv")
     else:
-        st.error("⚠️ 致命的なエラー：解が見つかりませんでした。")
-
-
+        st.error("⚠️ 解が見つかりませんでした。設定を確認してください。")
