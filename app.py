@@ -5,7 +5,7 @@ from ortools.sat.python import cp_model
 
 # --- 画面設定 ---
 st.set_page_config(page_title="世界最高峰 勤務作成AI 究極版", page_icon="📅", layout="wide")
-st.title("🛡️ 究極の勤務作成エンジン (Boundary-Aware Optimizer V44)")
+st.title("🛡️ 究極の勤務作成エンジン (Boundary-Aware V45)")
 
 # --- サイドバー：詳細設定 ---
 with st.sidebar:
@@ -38,9 +38,10 @@ days_cols = [f"{d+1}({weekdays_ja[calendar.weekday(int(year), int(month), d+1)]}
 options = ["", "休", "日"] + user_shifts
 
 # --- メイン画面：前月末の状況入力 ---
-st.subheader("⏮️ 前月末の勤務状況 (過去4日間)")
-st.write("今月の1日目における連勤制限(4日まで)と遅早禁止を判定するために使用します。")
-prev_days = ["前月27日", "前月28日", "前月29日", "前月末日"]
+st.subheader("⏮️ 前月末の勤務状況 (直近4日間)")
+st.write("前月の勤務表の最後4日間をそのまま入力してください。連勤防止(4連勤まで)に使用します。")
+# 【修正箇所】表示ラベルを「～日前」形式に変更
+prev_days = ["前月4日前", "前月3日前", "前月2日前", "前月末日"]
 prev_df = pd.DataFrame("休", index=staff_names, columns=prev_days)
 for col in prev_days:
     prev_df[col] = pd.Categorical(prev_df[col], categories=options)
@@ -59,32 +60,28 @@ exclude_df = pd.DataFrame(False, index=[d+1 for d in range(num_days)], columns=u
 edited_exclude = st.data_editor(exclude_df, use_container_width=True, key="exclude_editor")
 
 # --- 計算ロジック ---
-if st.button("🚀 境界条件を考慮して勤務表を生成"):
+if st.button("🚀 勤務表を生成する"):
     model = cp_model.CpModel()
     S_OFF, S_NIKKIN = 0, num_user_shifts + 1
-    
-    # 文字からIDへの変換辞書
     char_to_id = {"休": S_OFF, "日": S_NIKKIN, "": -1}
     for idx, name in enumerate(user_shifts):
         char_to_id[name] = idx + 1
     
-    # 属性IDの準備
     early_ids = [user_shifts.index(s) + 1 for s in early_shifts]
     late_ids = [user_shifts.index(s) + 1 for s in late_shifts]
 
-    # 変数作成
     shifts = {(s, d, i): model.NewBoolVar(f's{s}d{d}i{i}') for s in range(total_staff) for d in range(num_days) for i in range(num_user_shifts + 2)}
     obj_terms = []
 
-    # 前月末データの数値化
-    prev_work_matrix = [] # 1:出勤, 0:休み
-    prev_last_shift = [] # 最終日のシフトID
+    # 前月末データの取得
+    prev_work_matrix = [] 
+    prev_last_shift = [] 
     for s in range(total_staff):
         row_work = []
         for d_idx in range(4):
             val = edited_prev.iloc[s, d_idx]
             row_work.append(1 if val != "休" else 0)
-            if d_idx == 3: # 最終日
+            if d_idx == 3: # 前月末日
                 prev_last_shift.append(char_to_id.get(val, S_OFF))
         prev_work_matrix.append(row_work)
 
@@ -92,7 +89,6 @@ if st.button("🚀 境界条件を考慮して勤務表を生成"):
     for d in range(num_days):
         wd = calendar.weekday(int(year), int(month), d + 1)
         
-        # 1. 役割の充足 (A-E)
         for idx, s_name in enumerate(user_shifts):
             s_id = idx + 1
             is_excluded = edited_exclude.iloc[d, idx]
@@ -109,35 +105,31 @@ if st.button("🚀 境界条件を考慮して勤務表を生成"):
         for s in range(total_staff):
             model.Add(sum(shifts[(s, d, i)] for i in range(num_user_shifts + 2)) == 1)
             
-            # 2. 遅→早禁止
-            # 今月内の判定
+            # 遅→早禁止 (今月内)
             if d < num_days - 1:
                 for l_id in late_ids:
                     for e_id in early_ids:
                         nle = model.NewBoolVar(f'nle_{s}_{d}_{l_id}_{e_id}')
                         model.Add(shifts[(s, d, l_id)] + shifts[(s, d+1, e_id)] <= 1).OnlyEnforceIf(nle)
                         obj_terms.append(nle * 10000000)
-            # 月をまたぐ判定 (今月1日目)
+            # 遅→早禁止 (月またぎ：前月末日が遅番なら今月1日は早番禁止)
             if d == 0:
                 if prev_last_shift[s] in late_ids:
                     for e_id in early_ids:
                         model.Add(shifts[(s, 0, e_id)] == 0)
 
-            # 3. 勤務指定の反映
+            # 勤務指定
             req = edited_request.iloc[s, d]
             if req in char_to_id and req != "":
                 model.Add(shifts[(s, d, char_to_id[req])] == 1)
 
     # --- 4連勤制限 (5連勤禁止) ---
     for s in range(total_staff):
-        # 過去4日分を考慮したリストを作成 [前月27, 28, 29, 30, 1, 2, ...]
-        # 1-shifts[(s, d, S_OFF)] は出勤なら1、休みなら0
         is_working_this_month = [ (1 - shifts[(s, d, S_OFF)]) for d in range(num_days) ]
         full_work_history = prev_work_matrix[s] + is_working_this_month
         
-        # すべての5日間連続区間において、合計が4以下であること
         for start_d in range(len(full_work_history) - 4):
-            n5c = model.NewBoolVar(f'n5c_s{s}_hist{start_d}')
+            n5c = model.NewBoolVar(f'n5c_s{s}_h{start_d}')
             model.Add(sum(full_work_history[start_d:start_d+5]) <= 4).OnlyEnforceIf(n5c)
             obj_terms.append(n5c * 5000000)
 
@@ -146,18 +138,17 @@ if st.button("🚀 境界条件を考慮して勤務表を生成"):
             for d in range(num_days):
                 wd = calendar.weekday(int(year), int(month), d+1)
                 m_goal = model.NewBoolVar(f'mg_{s}_{d}')
-                if wd >= 5: # 土日祝
+                if wd >= 5: 
                     model.Add(shifts[(s, d, S_OFF)] == 1).OnlyEnforceIf(m_goal)
-                    obj_terms.append(m_goal * 1000000)
-                else: # 平日
+                else: 
                     model.Add(shifts[(s, d, S_OFF)] == 0).OnlyEnforceIf(m_goal)
-                    obj_terms.append(m_goal * 1000000)
+                obj_terms.append(m_goal * 1000000)
         else:
             for d in range(num_days):
                 if edited_request.iloc[s, d] != "日":
                     model.Add(shifts[(s, d, S_NIKKIN)] == 0)
 
-        # 公休数
+        # 公休数死守
         actual_hols = sum(shifts[(s, d, S_OFF)] for d in range(num_days))
         model.Add(actual_hols >= int(target_hols[s]) - 1)
         model.Add(actual_hols <= int(target_hols[s]) + 1)
@@ -171,7 +162,7 @@ if st.button("🚀 境界条件を考慮して勤務表を生成"):
     status = solver.Solve(model)
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        st.success("✨ 前月末からの流れを考慮して勤務表を生成しました！")
+        st.success("✨ 前月末の状況を考慮し、最適な勤務表を生成しました！")
         res_data = []
         char_map = {S_OFF: "休", S_NIKKIN: "日"}
         for idx, name in enumerate(user_shifts): char_map[idx + 1] = name
@@ -183,4 +174,4 @@ if st.button("🚀 境界条件を考慮して勤務表を生成"):
         final_df["公休計"] = [row.count("休") for row in res_data]
         st.dataframe(final_df.style.applymap(lambda x: 'background-color: #ffcccc' if x=="休" else ('background-color: #e0f0ff' if x=="日" else 'background-color: #ccffcc')), use_container_width=True)
         st.download_button("📥 CSV保存", final_df.to_csv().encode('utf-8-sig'), f"roster_{year}_{month}.csv")
-    else: st.error("⚠️ 解が見つかりませんでした。前月末のデータか公休数を見直してください。")
+    else: st.error("⚠️ 解が見つかりませんでした。設定や前月末データを確認してください。")
