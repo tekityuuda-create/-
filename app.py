@@ -5,14 +5,14 @@ from ortools.sat.python import cp_model
 
 # --- 画面設定 ---
 st.set_page_config(page_title="世界最高峰 勤務作成AI 教育計画版", page_icon="🎓", layout="wide")
-st.title("🛡️ 究極の勤務作成エンジン (Education Master V48)")
+st.title("🛡️ 究極の勤務作成エンジン (Education Master V49)")
 
 # --- サイドバー：詳細設定 ---
 with st.sidebar:
     st.header("⚙️ システム構成")
     num_mgr = st.number_input("管理者の人数", min_value=0, max_value=5, value=2)
     num_regular = st.number_input("一般スタッフの人数", min_value=1, max_value=15, value=8)
-    total_staff = num_mgr + num_regular
+    total_staff = int(num_mgr + num_regular)
     
     st.header("📋 勤務区分設定")
     shift_input = st.text_input("勤務略称 (カンマ区切り)", "A,B,C,D,E")
@@ -29,14 +29,16 @@ with st.sidebar:
     
     st.header("👤 公休数設定")
     staff_names = [f"スタッフ{i+1}" for i in range(total_staff)]
-    target_hols = [st.number_input(f"{name} の公休", value=9, key=f"hol_{i}") for i, name in enumerate(staff_names)]
+    target_hols = []
+    for i in range(total_staff):
+        val = st.number_input(f"{staff_names[i]} の公休", value=9, key=f"hol_{i}")
+        target_hols.append(val)
 
-# --- 1. スキル・見習い設定 (プルダウン回避策) ---
+# --- 1. スキル・見習い設定 ---
 st.subheader("🎓 スキル・見習い設定")
 st.write("○:単独可, △:見習い（ベテランとペア必須）, ×:不可")
 skill_options = ["○", "△", "×"]
 skill_df = pd.DataFrame("○", index=staff_names, columns=user_shifts)
-# 【修正箇所】st.column_configを使わず、Categoricalデータ型でプルダウン化
 for col in user_shifts:
     skill_df[col] = pd.Categorical(skill_df[col], categories=skill_options)
 edited_skill = st.data_editor(skill_df, use_container_width=True, key="skill_editor")
@@ -54,7 +56,7 @@ weekdays_ja = ["月", "火", "水", "木", "金", "土", "日"]
 days_cols = [f"{d+1}({weekdays_ja[calendar.weekday(int(year), int(month), d+1)]})" for d in range(num_days)]
 options = ["", "休", "日"] + user_shifts
 
-# --- 3. 前月末の状況入力 (プルダウン回避策) ---
+# --- 3. 前月末の状況入力 ---
 st.subheader("⏮️ 前月末の勤務状況")
 prev_days = ["前月4日前", "前月3日前", "前月2日前", "前月末日"]
 prev_df = pd.DataFrame("休", index=staff_names, columns=prev_days)
@@ -62,7 +64,7 @@ for col in prev_days:
     prev_df[col] = pd.Categorical(prev_df[col], categories=options)
 edited_prev = st.data_editor(prev_df, use_container_width=True, key="prev_editor")
 
-# --- 4. 今月の勤務指定 (プルダウン回避策) ---
+# --- 4. 今月の勤務指定 ---
 st.subheader("📝 今月の勤務指定")
 request_df = pd.DataFrame("", index=staff_names, columns=days_cols)
 for col in days_cols:
@@ -86,15 +88,15 @@ if st.button("🚀 勤務作成開始"):
     shifts = {(s, d, i): model.NewBoolVar(f's{s}d{d}i{i}') for s in range(total_staff) for d in range(num_days) for i in range(num_user_shifts + 2)}
     obj_terms = []
 
-    # 前月末データ数値化
+    # 前月末データ処理
     prev_work_matrix = [] 
-    prev_last_shift = [] 
+    prev_last_shift_ids = [] 
     for s in range(total_staff):
         row_work = []
         for d_idx in range(4):
             val = edited_prev.iloc[s, d_idx]
             row_work.append(1 if val != "休" else 0)
-            if d_idx == 3: prev_last_shift.append(char_to_id.get(val, S_OFF))
+            if d_idx == 3: prev_last_shift_ids.append(char_to_id.get(val, S_OFF))
         prev_work_matrix.append(row_work)
 
     # --- 各日の制約 ---
@@ -105,19 +107,22 @@ if st.button("🚀 勤務作成開始"):
             is_excluded = edited_exclude.iloc[d, idx]
             is_sun_c = (wd == 6 and s_name == "C")
             
-            # 各担務において「戦力(○)」と「見習い(△)」の人数を算出
-            skilled_count = sum(shifts[(s, d, s_id)] for s in range(total_staff) if edited_skill.iloc[s, idx] == "○")
-            trainee_count = sum(shifts[(s, d, s_id)] for s in range(total_staff) if edited_skill.iloc[s, idx] == "△")
+            # スキルによる抽出
+            skilled_staff = [s for s in range(total_staff) if edited_skill.iloc[s, idx] == "○"]
+            trainee_staff = [s for s in range(total_staff) if edited_skill.iloc[s, idx] == "△"]
+            
+            skilled_sum = sum(shifts[(s, d, s_id)] for s in skilled_staff)
+            trainee_sum = sum(shifts[(s, d, s_id)] for s in trainee_staff)
 
             if is_excluded or is_sun_c:
-                model.Add(skilled_count + trainee_count == 0)
+                model.Add(skilled_sum + trainee_sum == 0)
             else:
-                model.Add(skilled_count == 1) # ベテラン1名絶対
-                model.Add(trainee_count <= 1) # 見習いは入っても1名まで
+                model.Add(skilled_sum == 1) # ベテラン1名絶対
+                model.Add(trainee_sum <= 1) # 見習い最大1名
 
         for s in range(total_staff):
             model.Add(sum(shifts[(s, d, i)] for i in range(num_user_shifts + 2)) == 1)
-            # スキル×の仕事禁止
+            # スキル×の禁止
             for idx, s_name in enumerate(user_shifts):
                 if edited_skill.iloc[s, idx] == "×":
                     model.Add(shifts[(s, d, idx+1)] == 0)
@@ -127,41 +132,43 @@ if st.button("🚀 勤務作成開始"):
                 for l_id in late_ids:
                     for e_id in early_ids:
                         model.Add(shifts[(s, d, l_id)] + shifts[(s, d+1, e_id)] <= 1)
-            if d == 0 and prev_last_shift[s] in late_ids:
-                for e_id in early_ids: model.Add(shifts[(s, 0, e_id)] == 0)
+            # 月またぎ遅→早禁止
+            if d == 0:
+                if prev_last_shift_ids[s] in late_ids:
+                    for e_id in early_ids: model.Add(shifts[(s, 0, e_id)] == 0)
 
-            # 勤務指定
+            # 指定反映
             req = edited_request.iloc[s, d]
             if req in char_to_id and req != "": model.Add(shifts[(s, d, char_to_id[req])] == 1)
 
     # --- 教育計画と個人ルール ---
     for s in range(total_staff):
-        # 【重要】見習い回数指定の反映
+        # 見習い回数目標の反映（セイウチ演算子を使わない安全な書き方）
         for idx, s_name in enumerate(user_shifts):
             target_val = int(edited_trainee_targets.iloc[s, idx])
             if edited_skill.iloc[s, idx] == "△" and target_val > 0:
-                # 指定した仕事の回数を固定する
-                model.Add(sum(shifts[(s, d, idx+1)] for d in range(num_days)) == target_hols_val := target_val)
+                model.Add(sum(shifts[(s, d, idx+1)] for d in range(num_days)) == target_val)
 
         # 4連勤制限
         is_working_this_month = [ (1 - shifts[(s, d, S_OFF)]) for d in range(num_days) ]
-        full_work_history = prev_work_matrix[s] + is_working_this_month
-        for start_d in range(len(full_work_history) - 4):
-            model.Add(sum(full_work_history[start_d:start_d+5]) <= 4)
+        full_history = prev_work_matrix[s] + is_working_this_month
+        for start_d in range(len(full_history) - 4):
+            model.Add(sum(full_history[start_d:start_d+5]) <= 4)
 
         # 管理者(1-2) / 一般職ルール
         if s < num_mgr:
             for d in range(num_days):
                 wd = calendar.weekday(int(year), int(month), d+1)
                 m_goal = model.NewBoolVar(f'mg_{s}_{d}')
-                if wd >= 5: # 土日祝
+                if wd >= 5: # 土日祝休み努力目標
                     model.Add(shifts[(s, d, S_OFF)] == 1).OnlyEnforceIf(m_goal)
                     obj_terms.append(m_goal * 1000000)
                 else: 
-                    model.Add(shifts[(s, d, S_OFF)] == 0)
+                    model.Add(shifts[(s, d, S_OFF)] == 0) # 平日休み禁止
         else:
             for d in range(num_days):
-                if edited_request.iloc[s, d] != "日": model.Add(shifts[(s, d, S_NIKKIN)] == 0)
+                if edited_request.iloc[s, d] != "日":
+                    model.Add(shifts[(s, d, S_NIKKIN)] == 0) # 一般職の勝手な日勤禁止
 
         # 公休数死守
         model.Add(sum(shifts[(s, d, S_OFF)] for d in range(num_days)) == int(target_hols[s]))
@@ -172,7 +179,7 @@ if st.button("🚀 勤務作成開始"):
     status = solver.Solve(model)
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        st.success("✨ 作成完了！見習い回数とベテランとのペアリングを保証しました。")
+        st.success("✨ 成功しました！")
         res_data = []
         char_map = {S_OFF: "休", S_NIKKIN: "日"}
         for idx, name in enumerate(user_shifts): char_map[idx + 1] = name
