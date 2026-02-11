@@ -5,7 +5,7 @@ from ortools.sat.python import cp_model
 
 # --- 画面設定 ---
 st.set_page_config(page_title="世界最高峰 勤務作成AI 究極版", page_icon="🛡️", layout="wide")
-st.title("🛡️ 究極の勤務作成エンジン (Rhythm Optimizer V52)")
+st.title("🛡️ 究極の勤務作成エンジン (Holiday-Streak Limiter V53)")
 
 # --- サイドバー：設定項目 ---
 with st.sidebar:
@@ -31,7 +31,7 @@ with st.sidebar:
     staff_names = [f"スタッフ{i+1}" for i in range(total_staff)]
     target_hols = []
     for i in range(total_staff):
-        label = f"{staff_names[i]} ({'管理者' if i < num_mgr else '一般'})"
+        label = f"{staff_names[i]} ({'管理者' if i < 2 else '一般'})"
         val = st.number_input(f"{label} の公休", value=9, key=f"hol_{i}")
         target_hols.append(val)
 
@@ -75,7 +75,7 @@ exclude_df = pd.DataFrame(False, index=[d+1 for d in range(num_days)], columns=u
 edited_exclude = st.data_editor(exclude_df, use_container_width=True, key="exclude_editor")
 
 # --- 計算ロジック ---
-if st.button("🚀 勤務表を生成する（リズム最適化モード）"):
+if st.button("🚀 勤務表を生成する（連休分散最適化）"):
     model = cp_model.CpModel()
     S_OFF, S_NIKKIN = 0, num_user_shifts + 1
     char_to_id = {"休": S_OFF, "日": S_NIKKIN, "": -1}
@@ -88,20 +88,20 @@ if st.button("🚀 勤務表を生成する（リズム最適化モード）"):
     obj_terms = []
 
     # 前月末データ解析
-    prev_work_matrix = []
+    prev_work_matrix = [] # 1:出勤, 0:休み
     prev_late_matrix = []
-    prev_early_matrix = []
+    prev_off_matrix = []  # 1:休み, 0:出勤
     for s in range(total_staff):
-        row_w, row_l, row_e = [], [], []
+        row_w, row_l, row_o = [], [], []
         for d_idx in range(4):
             val = edited_prev.iloc[s, d_idx]
             sid = char_to_id.get(val, -1)
             row_w.append(1 if val != "休" else 0)
             row_l.append(1 if sid in late_ids else 0)
-            row_e.append(1 if sid in early_ids else 0)
+            row_o.append(1 if val == "休" else 0)
         prev_work_matrix.append(row_w)
         prev_late_matrix.append(row_l)
-        prev_early_matrix.append(row_e)
+        prev_off_matrix.append(row_o)
 
     for d in range(num_days):
         wd = calendar.weekday(int(year), int(month), d + 1)
@@ -129,7 +129,6 @@ if st.button("🚀 勤務表を生成する（リズム最適化モード）"):
             req = edited_request.iloc[s, d]
             if req in char_to_id and req != "": model.Add(shifts[(s, d, char_to_id[req])] == 1)
 
-            # 遅→早禁止
             if d < num_days - 1:
                 for l_id in late_ids:
                     for e_id in early_ids:
@@ -140,44 +139,62 @@ if st.button("🚀 勤務表を生成する（リズム最適化モード）"):
             if d == 0 and prev_late_matrix[s][-1] == 1:
                 for e_id in early_ids: model.Add(shifts[(s, 0, e_id)] == 0)
 
-    # 個人ルール & 多様性最適化
+    # 個人ルール & 強力連休制限
     for s in range(total_staff):
+        this_month_off = [shifts[(s, d, S_OFF)] for d in range(num_days)]
         this_month_work = [(1 - shifts[(s, d, S_OFF)]) for d in range(num_days)]
         this_month_early = [sum(shifts[(s, d, i)] for i in early_ids) for d in range(num_days)]
         this_month_late = [sum(shifts[(s, d, i)] for i in late_ids) for d in range(num_days)]
 
-        # 4連勤制限
+        # 1. 4連勤制限（絶対遵守レベル）
         history_w = prev_work_matrix[s] + this_month_work
         for start_d in range(len(history_w) - 4):
             n5c = model.NewBoolVar(f'n5c_s{s}_d{start_d}')
             model.Add(sum(history_w[start_d:start_d+5]) <= 4).OnlyEnforceIf(n5c)
             obj_terms.append(n5c * 5000000)
 
-        # 早遅ミックス強化（早→遅の切り替えに巨大ボーナス）
+        # 2. 【究極】連休抑制ロジック (3連休以上を厳罰化)
+        history_o = prev_off_matrix[s] + this_month_off
+        for start_d in range(len(history_o) - 2):
+            # 3連休の窓
+            is_3off = model.NewBoolVar(f'is3off_s{s}_d{start_d}')
+            model.AddBoolAnd(history_o[start_d:start_d+3]).OnlyEnforceIf(is_3off)
+            
+            # 指定があるかチェック
+            # 今月の日付インデックスに変換
+            current_month_days = []
+            for i in range(3):
+                idx = start_d + i - 4 # 前月4日分を引く
+                if 0 <= idx < num_days:
+                    current_month_days.append(idx)
+            
+            # その3日間のいずれかが手動で「休」指定されているか
+            has_req_off = False
+            if current_month_days:
+                has_req_off = any(edited_request.iloc[s, idx] == "休" for idx in current_month_days)
+
+            if not has_req_off:
+                # 指定がないのに3連休以上になったら強烈なマイナス
+                obj_terms.append(is_3off * -8000000)
+            
+            # 4連休以上はさらに厳罰
+            if start_d <= len(history_o) - 4:
+                is_4off = model.NewBoolVar(f'is4off_s{s}_d{start_d}')
+                model.AddBoolAnd(history_o[start_d:start_d+4]).OnlyEnforceIf(is_4off)
+                if not has_req_off:
+                    obj_terms.append(is_4off * -15000000)
+
+        # 3. 早遅ミックス & 連続抑制
         for d in range(num_days - 1):
             mix_bonus = model.NewBoolVar(f'mix_b_{s}_{d}')
             model.AddBoolAnd([this_month_early[d], this_month_late[d+1]]).OnlyEnforceIf(mix_bonus)
-            obj_terms.append(mix_bonus * 5000000) # 属性が変わると500万点！
+            obj_terms.append(mix_bonus * 5000000)
 
-        # 早番ばかりの連続を抑制（3連を抑制）
-        history_e = prev_early_matrix[s] + this_month_early
-        for start_d in range(len(history_e) - 2):
-            e3_penalty = model.NewBoolVar(f'e3_p_{s}_{start_d}')
-            model.Add(sum(history_e[start_d:start_d+3]) <= 2).OnlyEnforceIf(e3_penalty)
-            obj_terms.append(e3_penalty * 1000000)
-
-        # 遅番ばかりの連続を抑制（2連を抑制）
-        history_l = prev_late_matrix[s] + this_month_late
-        for start_d in range(len(history_l) - 1):
-            l2_penalty = model.NewBoolVar(f'l2_p_{s}_{start_d}')
-            model.Add(sum(history_l[start_d:start_d+2]) <= 1).OnlyEnforceIf(l2_penalty)
-            obj_terms.append(l2_penalty * 2000000)
-
-        # 公休数
-        act_hols = sum(shifts[(s, d, S_OFF)] for d in range(num_days))
+        # 公休数死守
+        act_hols = sum(this_month_off)
         h_diff = model.NewIntVar(0, num_days, f'hdiff_s{s}')
         model.AddAbsEquality(h_diff, act_hols - int(target_hols[s]))
-        obj_terms.append(h_diff * -5000000)
+        obj_terms.append(h_diff * -10000000) # 1日ズレに1000万点マイナス
 
         # 管理者ルール
         if s < num_mgr:
@@ -197,7 +214,7 @@ if st.button("🚀 勤務表を生成する（リズム最適化モード）"):
     status = solver.Solve(model)
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        st.success("✨ シフトのリズムを均等に混ぜた勤務表を生成しました。")
+        st.success("✨ 連休を分散させ、勤務リズムを最適化しました！")
         res_data = []
         char_map = {S_OFF: "休", S_NIKKIN: "日"}
         for idx, name in enumerate(user_shifts): char_map[idx + 1] = name
@@ -208,4 +225,4 @@ if st.button("🚀 勤務表を生成する（リズム最適化モード）"):
         final_df["公休計"] = [row.count("休") for row in res_data]
         st.dataframe(final_df.style.applymap(lambda x: 'background-color: #ffcccc' if x=="休" else ('background-color: #e0f0ff' if x=="日" else ('background-color: #ffffcc' if x in early_shifts else 'background-color: #ccffcc'))), use_container_width=True)
         st.download_button("📥 結果をCSVで保存", final_df.to_csv().encode('utf-8-sig'), "roster.csv")
-    else: st.error("⚠️ 解が見つかりませんでした。")
+    else: st.error("⚠️ 解が見つかりませんでした。公休数やスキル設定を調整してください。")
