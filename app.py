@@ -4,8 +4,8 @@ import calendar
 from ortools.sat.python import cp_model
 
 # --- 画面設定 ---
-st.set_page_config(page_title="世界最高峰 勤務作成AI メンタルケア版", page_icon="🛡️", layout="wide")
-st.title("🛡️ 究極の勤務作成エンジン (Mental-Health Care V51)")
+st.set_page_config(page_title="世界最高峰 勤務作成AI 究極版", page_icon="🛡️", layout="wide")
+st.title("🛡️ 究極の勤務作成エンジン (Rhythm Optimizer V52)")
 
 # --- サイドバー：設定項目 ---
 with st.sidebar:
@@ -75,7 +75,7 @@ exclude_df = pd.DataFrame(False, index=[d+1 for d in range(num_days)], columns=u
 edited_exclude = st.data_editor(exclude_df, use_container_width=True, key="exclude_editor")
 
 # --- 計算ロジック ---
-if st.button("🚀 勤務表を生成する"):
+if st.button("🚀 勤務表を生成する（リズム最適化モード）"):
     model = cp_model.CpModel()
     S_OFF, S_NIKKIN = 0, num_user_shifts + 1
     char_to_id = {"休": S_OFF, "日": S_NIKKIN, "": -1}
@@ -87,23 +87,24 @@ if st.button("🚀 勤務表を生成する"):
     shifts = {(s, d, i): model.NewBoolVar(f's{s}d{d}i{i}') for s in range(total_staff) for d in range(num_days) for i in range(num_user_shifts + 2)}
     obj_terms = []
 
-    # 前月末データの数値化
-    prev_work_matrix = [] # 1:出勤, 0:休み
-    prev_is_late_matrix = [] # 1:遅番, 0:それ以外
+    # 前月末データ解析
+    prev_work_matrix = []
+    prev_late_matrix = []
+    prev_early_matrix = []
     for s in range(total_staff):
-        row_w = []
-        row_l = []
+        row_w, row_l, row_e = [], [], []
         for d_idx in range(4):
             val = edited_prev.iloc[s, d_idx]
+            sid = char_to_id.get(val, -1)
             row_w.append(1 if val != "休" else 0)
-            row_l.append(1 if char_to_id.get(val, -1) in late_ids else 0)
+            row_l.append(1 if sid in late_ids else 0)
+            row_e.append(1 if sid in early_ids else 0)
         prev_work_matrix.append(row_w)
-        prev_is_late_matrix.append(row_l)
+        prev_late_matrix.append(row_l)
+        prev_early_matrix.append(row_e)
 
-    # 日ごとの制約
     for d in range(num_days):
         wd = calendar.weekday(int(year), int(month), d + 1)
-        # 1. 役割充足
         for idx, s_name in enumerate(user_shifts):
             s_id = idx + 1
             is_excluded = edited_exclude.iloc[d, idx]
@@ -128,69 +129,75 @@ if st.button("🚀 勤務表を生成する"):
             req = edited_request.iloc[s, d]
             if req in char_to_id and req != "": model.Add(shifts[(s, d, char_to_id[req])] == 1)
 
-            # 遅→早禁止 (500万点)
+            # 遅→早禁止
             if d < num_days - 1:
                 for l_id in late_ids:
                     for e_id in early_ids:
                         nle = model.NewBoolVar(f'nle_{s}_{d}_{l_id}_{e_id}')
                         model.Add(shifts[(s, d, l_id)] + shifts[(s, d+1, e_id)] <= 1).OnlyEnforceIf(nle)
-                        obj_terms.append(nle * 5000000)
+                        obj_terms.append(nle * 10000000)
             
-            # 月またぎ遅→早
-            if d == 0 and prev_is_late_matrix[s][-1] == 1:
+            if d == 0 and prev_late_matrix[s][-1] == 1:
                 for e_id in early_ids: model.Add(shifts[(s, 0, e_id)] == 0)
 
-    # 個人ルール
+    # 個人ルール & 多様性最適化
     for s in range(total_staff):
-        # 連勤制限
         this_month_work = [(1 - shifts[(s, d, S_OFF)]) for d in range(num_days)]
+        this_month_early = [sum(shifts[(s, d, i)] for i in early_ids) for d in range(num_days)]
+        this_month_late = [sum(shifts[(s, d, i)] for i in late_ids) for d in range(num_days)]
+
+        # 4連勤制限
         history_w = prev_work_matrix[s] + this_month_work
         for start_d in range(len(history_w) - 4):
             n5c = model.NewBoolVar(f'n5c_s{s}_d{start_d}')
             model.Add(sum(history_w[start_d:start_d+5]) <= 4).OnlyEnforceIf(n5c)
             obj_terms.append(n5c * 5000000)
 
-        # 【新導入】遅番連続制限 (3日連続を抑制：300万点)
-        this_month_late = [sum(shifts[(s, d, l_id)] for l_id in late_ids) for d in range(num_days)]
-        history_l = prev_is_late_matrix[s] + this_month_late
-        for start_d in range(len(history_l) - 2):
-            no_late_3 = model.NewBoolVar(f'nl3_s{s}_d{start_d}')
-            model.Add(sum(history_l[start_d:start_d+3]) <= 2).OnlyEnforceIf(no_late_3)
-            obj_terms.append(no_late_3 * 3000000)
+        # 早遅ミックス強化（早→遅の切り替えに巨大ボーナス）
+        for d in range(num_days - 1):
+            mix_bonus = model.NewBoolVar(f'mix_b_{s}_{d}')
+            model.AddBoolAnd([this_month_early[d], this_month_late[d+1]]).OnlyEnforceIf(mix_bonus)
+            obj_terms.append(mix_bonus * 5000000) # 属性が変わると500万点！
 
-        # 見習い回数
-        for idx, s_name in enumerate(user_shifts):
-            t_target = int(edited_trainee_targets.iloc[s, idx])
-            if edited_skill.iloc[s, idx] == "△" and t_target > 0:
-                actual_t = sum(shifts[(s, d, idx+1)] for d in range(num_days))
-                t_diff = model.NewIntVar(0, num_days, f'tdiff_s{s}_i{idx}')
-                model.AddAbsEquality(t_diff, actual_t - t_target)
-                obj_terms.append(t_diff * -1000000)
+        # 早番ばかりの連続を抑制（3連を抑制）
+        history_e = prev_early_matrix[s] + this_month_early
+        for start_d in range(len(history_e) - 2):
+            e3_penalty = model.NewBoolVar(f'e3_p_{s}_{start_d}')
+            model.Add(sum(history_e[start_d:start_d+3]) <= 2).OnlyEnforceIf(e3_penalty)
+            obj_terms.append(e3_penalty * 1000000)
 
-        # 管理者 / 公休
+        # 遅番ばかりの連続を抑制（2連を抑制）
+        history_l = prev_late_matrix[s] + this_month_late
+        for start_d in range(len(history_l) - 1):
+            l2_penalty = model.NewBoolVar(f'l2_p_{s}_{start_d}')
+            model.Add(sum(history_l[start_d:start_d+2]) <= 1).OnlyEnforceIf(l2_penalty)
+            obj_terms.append(l2_penalty * 2000000)
+
+        # 公休数
+        act_hols = sum(shifts[(s, d, S_OFF)] for d in range(num_days))
+        h_diff = model.NewIntVar(0, num_days, f'hdiff_s{s}')
+        model.AddAbsEquality(h_diff, act_hols - int(target_hols[s]))
+        obj_terms.append(h_diff * -5000000)
+
+        # 管理者ルール
         if s < num_mgr:
             for d in range(num_days):
                 wd = calendar.weekday(int(year), int(month), d+1)
                 m_goal = model.NewBoolVar(f'mg_{s}_{d}')
                 if wd >= 5: model.Add(shifts[(s, d, S_OFF)] == 1).OnlyEnforceIf(m_goal)
                 else: model.Add(shifts[(s, d, S_OFF)] == 0).OnlyEnforceIf(m_goal)
-                obj_terms.append(m_goal * 100000)
+                obj_terms.append(m_goal * 2000000)
         else:
             for d in range(num_days):
                 if edited_request.iloc[s, d] != "日": model.Add(shifts[(s, d, S_NIKKIN)] == 0)
 
-        act_hols = sum(shifts[(s, d, S_OFF)] for d in range(num_days))
-        h_diff = model.NewIntVar(0, num_days, f'hdiff_s{s}')
-        model.AddAbsEquality(h_diff, act_hols - int(target_hols[s]))
-        obj_terms.append(h_diff * -2000000)
-
     model.Maximize(sum(obj_terms))
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 25.0
+    solver.parameters.max_time_in_seconds = 30.0
     status = solver.Solve(model)
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        st.success("✨ 労務管理上の心理的負担を軽減したシフトを生成しました。")
+        st.success("✨ シフトのリズムを均等に混ぜた勤務表を生成しました。")
         res_data = []
         char_map = {S_OFF: "休", S_NIKKIN: "日"}
         for idx, name in enumerate(user_shifts): char_map[idx + 1] = name
@@ -201,4 +208,4 @@ if st.button("🚀 勤務表を生成する"):
         final_df["公休計"] = [row.count("休") for row in res_data]
         st.dataframe(final_df.style.applymap(lambda x: 'background-color: #ffcccc' if x=="休" else ('background-color: #e0f0ff' if x=="日" else ('background-color: #ffffcc' if x in early_shifts else 'background-color: #ccffcc'))), use_container_width=True)
         st.download_button("📥 結果をCSVで保存", final_df.to_csv().encode('utf-8-sig'), "roster.csv")
-    else: st.error("⚠️ 致命的な矛盾があります。")
+    else: st.error("⚠️ 解が見つかりませんでした。")
