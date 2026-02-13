@@ -5,9 +5,9 @@ from ortools.sat.python import cp_model
 
 # --- 画面設定 ---
 st.set_page_config(page_title="世界最高峰 勤務作成AI 究極版", page_icon="🛡️", layout="wide")
-st.title("🛡️ 究極の勤務作成エンジン (Type-Safe Optimizer V54)")
+st.title("🛡️ 究極の勤務作成エンジン (Logic-Fixed V54)")
 
-# --- サイドバー：設定項目 ---
+# --- サイドバー：詳細設定 ---
 with st.sidebar:
     st.header("⚙️ システム構成")
     num_mgr = st.number_input("管理者の人数", min_value=0, max_value=5, value=2)
@@ -28,10 +28,14 @@ with st.sidebar:
     month = st.number_input("月", min_value=1, max_value=12, value=1, step=1)
     
     st.header("👤 公休数設定")
-    staff_names = [f"スタッフ{i+1}({'管理者' if i < num_mgr else '一般'})" for i in range(total_staff)]
-    target_hols =[st.number_input(f"{name} の公休", value=9, key=f"hol_{i}") for i, name in enumerate(staff_names)]
+    staff_names = [f"スタッフ{i+1}" for i in range(total_staff)]
+    target_hols = []
+    for i in range(total_staff):
+        label = f"{staff_names[i]} ({'管理者' if i < num_mgr else '一般'})"
+        val = st.number_input(f"{label} の公休", value=9, key=f"hol_{i}")
+        target_hols.append(val)
 
-# --- スキル設定 ---
+# --- スキル・見習い設定 ---
 st.subheader("🎓 スキル・見習い設定 (○:単独可, △:見習い, ×:不可)")
 skill_options = ["○", "△", "×"]
 skill_df = pd.DataFrame("○", index=staff_names, columns=user_shifts)
@@ -39,7 +43,6 @@ for col in user_shifts:
     skill_df[col] = pd.Categorical(skill_df[col], categories=skill_options)
 edited_skill = st.data_editor(skill_df, use_container_width=True, key="skill_editor")
 
-# --- 見習い回数目標 ---
 st.subheader("📊 見習い実施回数目標")
 trainee_cols = [f"{s}_見習い回数" for s in user_shifts]
 target_counts_df = pd.DataFrame(0, index=staff_names, columns=trainee_cols)
@@ -51,11 +54,10 @@ weekdays_ja = ["月", "火", "水", "木", "金", "土", "日"]
 days_cols = [f"{d+1}({weekdays_ja[calendar.weekday(int(year), int(month), d+1)]})" for d in range(num_days)]
 options = ["", "休", "日"] + user_shifts
 
-# --- 前月末状況 ---
+# --- 前月末状況入力 ---
 st.subheader("⏮️ 前月末の勤務状況 (4日間)")
-prev_days = ["前月4日前", "前月3日前", "前月2日前", "前月末日"]
-prev_df = pd.DataFrame("休", index=staff_names, columns=prev_days)
-for col in prev_days:
+prev_df = pd.DataFrame("休", index=staff_names, columns=["前月4日前", "前月3日前", "前月2日前", "前月末日"])
+for col in prev_df.columns:
     prev_df[col] = pd.Categorical(prev_df[col], categories=options)
 edited_prev = st.data_editor(prev_df, use_container_width=True, key="prev_editor")
 
@@ -72,7 +74,7 @@ exclude_df = pd.DataFrame(False, index=[d+1 for d in range(num_days)], columns=u
 edited_exclude = st.data_editor(exclude_df, use_container_width=True, key="exclude_editor")
 
 # --- 計算ロジック ---
-if st.button("🚀 勤務表を生成する（型エラー突破モード）"):
+if st.button("🚀 勤務作成開始"):
     model = cp_model.CpModel()
     S_OFF, S_NIKKIN = 0, num_user_shifts + 1
     char_to_id = {"休": S_OFF, "日": S_NIKKIN, "": -1}
@@ -85,9 +87,9 @@ if st.button("🚀 勤務表を生成する（型エラー突破モード）"):
     obj_terms = []
 
     # 前月末データ解析
-    prev_work_matrix = [] # 1:出勤, 0:休み
+    prev_work_matrix = [] 
     prev_late_matrix = []
-    prev_off_matrix = []  # 1:休み, 0:出勤
+    prev_off_matrix = []
     for s in range(total_staff):
         row_w, row_l, row_o = [], [], []
         for d_idx in range(4):
@@ -100,6 +102,7 @@ if st.button("🚀 勤務表を生成する（型エラー突破モード）"):
         prev_late_matrix.append(row_l)
         prev_off_matrix.append(row_o)
 
+    # 1. 役割充足
     for d in range(num_days):
         wd = calendar.weekday(int(year), int(month), d + 1)
         for idx, s_name in enumerate(user_shifts):
@@ -118,101 +121,96 @@ if st.button("🚀 勤務表を生成する（型エラー突破モード）"):
                 obj_terms.append(sk_ok * 10000000)
                 model.Add(trainee_sum <= 1)
 
-        for s in range(total_staff):
+    # 2. 個人制約
+    for s in range(total_staff):
+        # 中間変数：休み判定、早番判定、遅番判定を各日ごとに作る（エラー回避の鍵）
+        is_off_this_month = [shifts[(s, d, S_OFF)] for d in range(num_days)]
+        is_early_this_month = [model.NewBoolVar(f'ise_{s}_{d}') for d in range(num_days)]
+        is_late_this_month = [model.NewBoolVar(f'isl_{s}_{d}') for d in range(num_days)]
+        
+        for d in range(num_days):
+            # 1人1シフト
             model.Add(sum(shifts[(s, d, i)] for i in range(num_user_shifts + 2)) == 1)
-            for idx, s_name in enumerate(user_shifts):
+            
+            # 中間変数の定義（合計を個別の変数に変換）
+            model.Add(sum(shifts[(s, d, i)] for i in early_ids) == 1).OnlyEnforceIf(is_early_this_month[d])
+            model.Add(sum(shifts[(s, d, i)] for i in early_ids) == 0).OnlyEnforceIf(is_early_this_month[d].Not())
+            model.Add(sum(shifts[(s, d, i)] for i in late_ids) == 1).OnlyEnforceIf(is_late_this_month[d])
+            model.Add(sum(shifts[(s, d, i)] for i in late_ids) == 0).OnlyEnforceIf(is_late_this_month[d].Not())
+
+            # スキル制限
+            for idx, _ in enumerate(user_shifts):
                 if edited_skill.iloc[s, idx] == "×": model.Add(shifts[(s, d, idx+1)] == 0)
             
+            # 指定反映
             req = edited_request.iloc[s, d]
             if req in char_to_id and req != "": model.Add(shifts[(s, d, char_to_id[req])] == 1)
 
+            # 今月内 遅→早禁止
             if d < num_days - 1:
                 for l_id in late_ids:
                     for e_id in early_ids:
-                        nle = model.NewBoolVar(f'nle_{s}_{d}_{l_id}_{e_id}')
-                        model.Add(shifts[(s, d, l_id)] + shifts[(s, d+1, e_id)] <= 1).OnlyEnforceIf(nle)
-                        obj_terms.append(nle * 10000000)
+                        model.Add(shifts[(s, d, l_id)] + shifts[(s, d+1, e_id)] <= 1)
             
+            # 月またぎ 遅→早禁止
             if d == 0 and prev_late_matrix[s][-1] == 1:
                 for e_id in early_ids: model.Add(shifts[(s, 0, e_id)] == 0)
 
-    # 個人ルール & 制限
-    for s in range(total_staff):
-        this_month_off = [shifts[(s, d, S_OFF)] for d in range(num_days)]
+        # 4連勤制限
         this_month_work = [(1 - shifts[(s, d, S_OFF)]) for d in range(num_days)]
-
-        # 1. 4連勤制限
         history_w = prev_work_matrix[s] + this_month_work
         for start_d in range(len(history_w) - 4):
-            n5c = model.NewBoolVar(f'n5c_s{s}_d{start_d}')
-            # 【TypeError解決】sum()を使って線形制約として安全に判定
-            model.Add(sum(history_w[start_d:start_d+5]) <= 4).OnlyEnforceIf(n5c)
-            obj_terms.append(n5c * 5000000)
+            model.Add(sum(history_w[start_d:start_d+5]) <= 4)
 
-        # 2. 連休抑制ロジック (3連休、4連休以上の厳罰化)
-        history_o = prev_off_matrix[s] + this_month_off
-        for start_d in range(len(history_o) - 2):
-            # 【TypeError解決】AddBoolAnd をやめ、sum(...) == 3 で確実に判定
-            is_3off = model.NewBoolVar(f'is3off_s{s}_d{start_d}')
-            model.Add(sum(history_o[start_d:start_d+3]) == 3).OnlyEnforceIf(is_3off)
-            
-            # 申し込み(指定)の有無をチェック
-            current_month_days = []
-            for k in range(3):
-                idx = start_d + k - 4 # 前月4日分を引く
-                if 0 <= idx < num_days:
-                    current_month_days.append(idx)
-            
-            has_req_off = False
-            if current_month_days:
-                has_req_off = any(edited_request.iloc[s, idx] == "休" for idx in current_month_days)
+        # 【究極】連休抑制（中間変数を使ってエラー回避）
+        all_off_history = [model.NewBoolVar(f'ao_{s}_{k}') for k in range(4 + num_days)]
+        # 前月分
+        for k in range(4):
+            if prev_off_matrix[s][k] == 1: model.Add(all_off_history[k] == 1)
+            else: model.Add(all_off_history[k] == 0)
+        # 今月分
+        for k in range(num_days):
+            model.Add(all_off_history[k+4] == 1).OnlyEnforceIf(is_off_this_month[k])
+            model.Add(all_off_history[k+4] == 0).OnlyEnforceIf(is_off_this_month[k].Not())
 
-            if not has_req_off:
-                obj_terms.append(is_3off * -8000000)
+        for start_d in range(len(all_off_history) - 2):
+            is_3off = model.NewBoolVar(f'i3o_{s}_{start_d}')
+            model.AddBoolAnd([all_off_history[start_d], all_off_history[start_d+1], all_off_history[start_d+2]]).OnlyEnforceIf(is_3off)
             
-            # 4連休以上はさらに厳罰
-            if start_d <= len(history_o) - 4:
-                is_4off = model.NewBoolVar(f'is4off_s{s}_d{start_d}')
-                model.Add(sum(history_o[start_d:start_d+4]) == 4).OnlyEnforceIf(is_4off)
-                
-                has_req_off_4 = False
-                current_month_days_4 = []
-                for k in range(4):
-                    idx = start_d + k - 4
-                    if 0 <= idx < num_days:
-                        current_month_days_4.append(idx)
-                if current_month_days_4:
-                    has_req_off_4 = any(edited_request.iloc[s, idx] == "休" for idx in current_month_days_4)
-                    
-                if not has_req_off_4:
-                    obj_terms.append(is_4off * -15000000)
+            # 指定なし3連休を抑制
+            current_month_range = []
+            for i in range(3):
+                idx = start_d + i - 4
+                if 0 <= idx < num_days: current_month_range.append(idx)
+            has_req = any(edited_request.iloc[s, idx] == "休" for idx in current_month_range) if current_month_range else False
+            if not has_req: obj_terms.append(is_3off * -8000000)
 
-        # 3. 早遅ミックス強化（【TypeError解決】安全な足し算で判定）
+        # 早遅ミックス（修正版：中間変数を使用）
         for d in range(num_days - 1):
-            mix_bonus = model.NewBoolVar(f'mix_b_{s}_{d}')
-            # 今日の早番の合計 ＋ 明日の遅番の合計 == 2 になればボーナス
-            early_today = sum(shifts[(s, d, i)] for i in early_ids)
-            late_tomorrow = sum(shifts[(s, d+1, i)] for i in late_ids)
-            model.Add(early_today + late_tomorrow == 2).OnlyEnforceIf(mix_bonus)
-            obj_terms.append(mix_bonus * 5000000)
+            mix_b = model.NewBoolVar(f'mix_{s}_{d}')
+            model.AddBoolAnd([is_early_this_month[d], is_late_this_month[d+1]]).OnlyEnforceIf(mix_b)
+            obj_terms.append(mix_b * 5000000)
 
-        # 公休数死守
-        act_hols = sum(this_month_off)
-        h_diff = model.NewIntVar(0, num_days, f'hdiff_s{s}')
-        model.AddAbsEquality(h_diff, act_hols - int(target_hols[s]))
-        obj_terms.append(h_diff * -10000000)
-
-        # 管理者ルール
+        # 管理者ルール / 公休
         if s < num_mgr:
             for d in range(num_days):
                 wd = calendar.weekday(int(year), int(month), d+1)
                 m_goal = model.NewBoolVar(f'mg_{s}_{d}')
                 if wd >= 5: model.Add(shifts[(s, d, S_OFF)] == 1).OnlyEnforceIf(m_goal)
                 else: model.Add(shifts[(s, d, S_OFF)] == 0).OnlyEnforceIf(m_goal)
-                obj_terms.append(m_goal * 2000000)
+                obj_terms.append(m_goal * 1000000)
         else:
             for d in range(num_days):
                 if edited_request.iloc[s, d] != "日": model.Add(shifts[(s, d, S_NIKKIN)] == 0)
+
+        # 見習い回数目標
+        for idx, _ in enumerate(user_shifts):
+            target_v = int(edited_trainee_targets.iloc[s, idx])
+            if edited_skill.iloc[s, idx] == "△" and target_v > 0:
+                model.Add(sum(shifts[(s, d, idx+1)] for d in range(num_days)) == target_v)
+
+        # 公休数死守
+        model.Add(sum(is_off_this_month) == int(target_hols[s]))
 
     model.Maximize(sum(obj_terms))
     solver = cp_model.CpSolver()
@@ -220,7 +218,7 @@ if st.button("🚀 勤務表を生成する（型エラー突破モード）"):
     status = solver.Solve(model)
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        st.success("✨ 連休を抑制し、早遅ミックスを完全に最適化した勤務表を生成しました！")
+        st.success("✨ 成功しました！連休を分散し、理想的なシフトリズムを実現しました。")
         res_data = []
         char_map = {S_OFF: "休", S_NIKKIN: "日"}
         for idx, name in enumerate(user_shifts): char_map[idx + 1] = name
@@ -230,5 +228,5 @@ if st.button("🚀 勤務表を生成する（型エラー突破モード）"):
         final_df = pd.DataFrame(res_data, index=staff_names, columns=days_cols)
         final_df["公休計"] = [row.count("休") for row in res_data]
         st.dataframe(final_df.style.applymap(lambda x: 'background-color: #ffcccc' if x=="休" else ('background-color: #e0f0ff' if x=="日" else ('background-color: #ffffcc' if x in early_shifts else 'background-color: #ccffcc'))), use_container_width=True)
-        st.download_button("📥 結果をCSVで保存", final_df.to_csv().encode('utf-8-sig'), "roster.csv")
-    else: st.error("⚠️ 解が見つかりませんでした。公休数や不要設定を調整してください。")
+        st.download_button("📥 CSV保存", final_df.to_csv().encode('utf-8-sig'), "roster.csv")
+    else: st.error("⚠️ 解が見つかりません。公休数や見習い回数に無理がないか確認してください。")
