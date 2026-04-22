@@ -7,7 +7,7 @@ from ortools.sat.python import cp_model
 # --- 画面基本設定 ---
 st.set_page_config(page_title="世界最高峰 勤務作成AI 究極版", page_icon="🛡️", layout="wide")
 
-# --- セッション状態の初期化 ---
+# --- セッション状態の初期化 (全データ保存用) ---
 if 'config' not in st.session_state:
     st.session_state.config = {
         "num_mgr": 2,
@@ -17,20 +17,21 @@ if 'config' not in st.session_state:
         "early_shifts": ["A", "B", "C"],
         "late_shifts": ["D", "E"],
         "year": 2025,
-        "month": 1
+        "month": 1,
+        "saved_tables": {} # スキル、公休、指定などの詳細データ
     }
 
-st.title("🛡️ 究極の勤務作成エンジン (Stability Pro V60)")
+st.title("🛡️ 究極の勤務作成エンジン (Total Backup V61)")
 
 # --- サイドバー：設定の保存と読込 ---
 with st.sidebar:
-    st.header("💾 設定の保存と復元")
-    uploaded_file = st.file_uploader("設定ファイルを読み込む", type="json")
+    st.header("💾 設定の全保存と復元")
+    uploaded_file = st.file_uploader("設定ファイルを読み込む(.json)", type="json")
     if uploaded_file is not None:
         try:
             load_data = json.load(uploaded_file)
             st.session_state.config.update(load_data)
-            st.success("設定を復元しました。")
+            st.success("全てのデータを復元しました。")
         except:
             st.error("エラー：ファイルの形式が正しくありません。")
 
@@ -39,7 +40,7 @@ with st.sidebar:
     year = st.number_input("年", value=st.session_state.config["year"], step=1)
     month = st.number_input("月", min_value=1, max_value=12, value=st.session_state.config["month"], step=1)
 
-# --- タブ分けによる整理 ---
+# --- タブ分け ---
 tab1, tab2, tab3 = st.tabs(["⚙️ システム構成", "👤 スタッフ・スキル設定", "🚀 勤務表の作成"])
 
 with tab1:
@@ -50,13 +51,13 @@ with tab1:
         num_regular = st.number_input("一般スタッフの人数", min_value=1, max_value=20, value=st.session_state.config["num_regular"])
         total_staff = int(num_mgr + num_regular)
         
-        current_names = st.session_state.config["staff_names"]
+        # 名前リストの復元・調整
+        current_names = st.session_state.config.get("staff_names", [f"スタッフ{i+1}" for i in range(total_staff)])
         if len(current_names) < total_staff:
             current_names.extend([f"スタッフ{i+1}" for i in range(len(current_names), total_staff)])
-        elif len(current_names) > total_staff:
-            current_names = current_names[:total_staff]
+        final_staff_names = current_names[:total_staff]
         
-        name_df = pd.DataFrame({"名前": current_names})
+        name_df = pd.DataFrame({"名前": final_staff_names})
         edited_names_df = st.data_editor(name_df, use_container_width=True, key="name_editor")
         final_staff_names = edited_names_df["名前"].tolist()
 
@@ -67,24 +68,40 @@ with tab1:
         early_shifts = st.multiselect("早番グループ", user_shifts_list, default=[s for s in user_shifts_list if s in st.session_state.config["early_shifts"]])
         late_shifts = st.multiselect("遅番グループ", user_shifts_list, default=[s for s in user_shifts_list if s in st.session_state.config["late_shifts"]])
 
+# --- 表データの復元用ヘルパー関数 ---
+def get_saved_df(table_key, default_df):
+    if table_key in st.session_state.config.get("saved_tables", {}):
+        saved_data = st.session_state.config["saved_tables"][table_key]
+        try:
+            return pd.DataFrame(saved_data)
+        except:
+            return default_df
+    return default_df
+
 with tab2:
     st.subheader("🎓 スキル・公休・教育目標")
+    
+    # スキル設定
     skill_options = ["○", "△", "×"]
-    default_skill = pd.DataFrame("○", index=final_staff_names, columns=user_shifts_list)
+    init_skill_df = pd.DataFrame("○", index=final_staff_names, columns=user_shifts_list)
+    skill_df = get_saved_df("skill", init_skill_df)
     for col in user_shifts_list:
-        default_skill[col] = pd.Categorical(default_skill[col], categories=skill_options)
-    edited_skill = st.data_editor(default_skill, use_container_width=True, key="skill_editor")
+        if col in skill_df.columns:
+            skill_df[col] = pd.Categorical(skill_df[col], categories=skill_options)
+    edited_skill = st.data_editor(skill_df, use_container_width=True, key="skill_editor")
     
     col_sub1, col_sub2 = st.columns(2)
     with col_sub1:
         st.write("📊 公休数 (B列)")
-        default_hols = pd.DataFrame(9, index=final_staff_names, columns=["公休数"])
-        edited_hols = st.data_editor(default_hols, use_container_width=True, key="hol_editor")
+        init_hols_df = pd.DataFrame(9, index=final_staff_names, columns=["公休数"])
+        hols_df = get_saved_df("hols", init_hols_df)
+        edited_hols = st.data_editor(hols_df, use_container_width=True, key="hol_editor")
     with col_sub2:
         st.write("📈 見習い(△)の回数目標")
         trainee_cols = [f"{s}_見習い回数" for s in user_shifts_list]
-        default_trainee = pd.DataFrame(0, index=final_staff_names, columns=trainee_cols)
-        edited_trainee_targets = st.data_editor(default_trainee, use_container_width=True, key="trainee_target_editor")
+        init_trainee_df = pd.DataFrame(0, index=final_staff_names, columns=trainee_cols)
+        trainee_df = get_saved_df("trainee", init_trainee_df)
+        edited_trainee_targets = st.data_editor(trainee_df, use_container_width=True, key="trainee_target_editor")
 
 with tab3:
     _, num_days = calendar.monthrange(int(year), int(month))
@@ -92,28 +109,58 @@ with tab3:
     days_cols = [f"{d+1}({weekdays_ja[calendar.weekday(int(year), int(month), d+1)]})" for d in range(num_days)]
     options = ["", "休", "日"] + user_shifts_list
 
-    st.subheader("⏮️ 前月末の勤務状況 (過去4日間)")
-    prev_options = ["日", "休", "早", "遅"]
+    st.subheader("⏮️ 前月末の勤務状況")
     prev_days = ["前月4日前", "前月3日前", "前月2日前", "前月末日"]
-    default_prev = pd.DataFrame("休", index=final_staff_names, columns=prev_days)
+    init_prev_df = pd.DataFrame("休", index=final_staff_names, columns=prev_days)
+    prev_df = get_saved_df("prev", init_prev_df)
     for col in prev_days:
-        default_prev[col] = pd.Categorical(default_prev[col], categories=prev_options)
-    edited_prev = st.data_editor(default_prev, use_container_width=True, key="prev_editor")
+        if col in prev_df.columns:
+            prev_df[col] = pd.Categorical(prev_df[col], categories=["日", "休", "早", "遅"])
+    edited_prev = st.data_editor(prev_df, use_container_width=True, key="prev_editor")
 
     st.subheader("📝 今月の勤務指定 (申し込み)")
-    default_request = pd.DataFrame("", index=final_staff_names, columns=days_cols)
+    init_req_df = pd.DataFrame("", index=final_staff_names, columns=days_cols)
+    req_df = get_saved_df("request", init_req_df)
+    # 日数が変わる可能性があるため、現在の列に合わせる処理
+    req_df = req_df.reindex(columns=days_cols, fill_value="")
     for col in days_cols:
-        default_request[col] = pd.Categorical(default_request[col], categories=options)
-    edited_request = st.data_editor(default_request, use_container_width=True, key="request_editor")
+        req_df[col] = pd.Categorical(req_df[col], categories=options)
+    edited_request = st.data_editor(req_df, use_container_width=True, key="request_editor")
 
     st.subheader("🚫 不要担務の設定")
-    default_exclude = pd.DataFrame(False, index=[d+1 for d in range(num_days)], columns=user_shifts_list)
-    edited_exclude = st.data_editor(default_exclude, use_container_width=True, key="exclude_editor")
+    init_excl_df = pd.DataFrame(False, index=[d+1 for d in range(num_days)], columns=user_shifts_list)
+    excl_df = get_saved_df("exclude", init_excl_df)
+    excl_df = excl_df.reindex(index=[d+1 for d in range(num_days)], columns=user_shifts_list, fill_value=False)
+    edited_exclude = st.data_editor(excl_df, use_container_width=True, key="exclude_editor")
 
-    save_data = {"num_mgr": num_mgr, "num_regular": num_regular, "staff_names": final_staff_names, "user_shifts": shift_input, "early_shifts": early_shifts, "late_shifts": late_shifts, "year": year, "month": month}
-    st.sidebar.download_button(label="📥 現在の設定を保存", data=json.dumps(save_data, ensure_ascii=False), file_name=f"roster_config.json", mime="application/json")
+    # --- 【重要】保存データの構築ロジック ---
+    total_config_save = {
+        "num_mgr": num_mgr,
+        "num_regular": num_regular,
+        "staff_names": final_staff_names,
+        "user_shifts": shift_input,
+        "early_shifts": early_shifts,
+        "late_shifts": late_shifts,
+        "year": year,
+        "month": month,
+        "saved_tables": {
+            "skill": edited_skill.to_dict(),
+            "hols": edited_hols.to_dict(),
+            "trainee": edited_trainee_targets.to_dict(),
+            "prev": edited_prev.to_dict(),
+            "request": edited_request.to_dict(),
+            "exclude": edited_exclude.to_dict()
+        }
+    }
+    st.sidebar.download_button(
+        label="📥 全ての設定をPCに保存",
+        data=json.dumps(total_config_save, ensure_ascii=False),
+        file_name=f"full_roster_config_{year}_{month}.json",
+        mime="application/json"
+    )
 
-    if st.button("🚀 勤務作成を実行（最高精度・近似解決）", type="primary"):
+    if st.button("🚀 勤務作成を実行する", type="primary"):
+        # --- 最適化計算ロジック (V60準拠) ---
         model = cp_model.CpModel()
         num_user_shifts = len(user_shifts_list)
         S_OFF, S_NIKKIN = 0, num_user_shifts + 1
@@ -134,7 +181,6 @@ with tab3:
                 if d_idx == 3: prev_is_late_last.append(val == "遅")
             prev_work_matrix.append(row_w)
 
-        # 担務充足（1000万点）
         for d in range(num_days):
             wd_v = calendar.weekday(int(year), int(month), d + 1)
             for idx, s_name in enumerate(user_shifts_list):
@@ -151,7 +197,6 @@ with tab3:
                     obj_terms.append(sk_ok * 10000000)
                     model.Add(trainee_sum <= 1)
 
-        # 個人制約
         for s in range(total_staff):
             is_off_m = [shifts[(s, d, S_OFF)] for d in range(num_days)]
             is_early_m = [model.NewBoolVar(f'ie_{s}_{d}') for d in range(num_days)]
@@ -190,7 +235,7 @@ with tab3:
                     m_g = model.NewBoolVar(f'mg_{s}_{d}')
                     if wd_v >= 5: model.Add(shifts[(s, d, S_OFF)] == 1).OnlyEnforceIf(m_g)
                     else: model.Add(shifts[(s, d, S_OFF)] == 0).OnlyEnforceIf(m_g)
-                    obj_terms.append(m_g * 500000)
+                    obj_terms.append(m_g * 1000000)
             else:
                 for d in range(num_days):
                     if edited_request.iloc[s, d] != "日": model.Add(shifts[(s, d, S_NIKKIN)] == 0)
@@ -214,7 +259,7 @@ with tab3:
         status = solver.Solve(model)
 
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("✨ 成功！最高精度での近似解を出力しました。")
+            st.success("✨ 勤務表が完成しました！")
             res_data = []
             char_map = {S_OFF: "休", S_NIKKIN: "日"}
             for idx, name in enumerate(user_shifts_list): char_map[idx + 1] = name
@@ -224,7 +269,6 @@ with tab3:
             final_df = pd.DataFrame(res_data, index=final_staff_names, columns=days_cols)
             final_df["公休数"] = [row.count("休") for row in res_data]
             
-            # 【修正点】最新のPandas対応：applymapをmapに変更
             def color_cells(val):
                 if val == "休": return 'background-color: #ffcccc'
                 if val == "日": return 'background-color: #e0f0ff'
