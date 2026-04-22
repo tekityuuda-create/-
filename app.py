@@ -15,7 +15,7 @@ if 'config' not in st.session_state:
         "year": 2025, "month": 1, "saved_tables": {}
     }
 
-st.title("🛡️ 究極の勤務作成エンジン (Rhythm-Balanced V62)")
+st.title("🛡️ 究極の勤務作成エンジン (Fairness & Rhythm V63)")
 
 # --- サイドバー：保存と読込 ---
 with st.sidebar:
@@ -25,14 +25,14 @@ with st.sidebar:
         try:
             load_data = json.load(uploaded_file)
             st.session_state.config.update(load_data)
-            st.success("全てのデータを復元しました。")
+            st.success("全データを復元しました。")
         except:
             st.error("エラー：形式が違います。")
 
     st.divider()
     st.header("📅 対象年月")
-    year = st.number_input("年", value=st.session_state.config["year"], step=1)
-    month = st.number_input("月", min_value=1, max_value=12, value=st.session_state.config["month"], step=1)
+    year = st.number_input("年", 2024, 2030, st.session_state.config["year"])
+    month = st.number_input("月", 1, 12, st.session_state.config["month"])
 
 # --- タブ分け ---
 tab1, tab2, tab3 = st.tabs(["⚙️ システム構成", "👤 スタッフ・スキル設定", "🚀 勤務表の作成"])
@@ -88,11 +88,11 @@ with tab3:
     days_cols = [f"{d+1}({weekdays_ja[calendar.weekday(int(year), int(month), d+1)]})" for d in range(num_days)]
     options = ["", "休", "日"] + user_shifts_list
 
-    st.subheader("⏮️ 前月末の勤務状況 (過去4日間)")
+    st.subheader("⏮️ 前月末の勤務状況")
     prev_days = ["前月4日前", "前月3日前", "前月2日前", "前月末日"]
     edited_prev = st.data_editor(get_saved_df("prev", pd.DataFrame("休", index=final_staff_names, columns=prev_days)), use_container_width=True, key="prev_editor")
 
-    st.subheader("📝 今月の勤務指定 (申し込み)")
+    st.subheader("📝 今月の勤務指定")
     req_df = get_saved_df("request", pd.DataFrame("", index=final_staff_names, columns=days_cols)).reindex(columns=days_cols, fill_value="")
     for col in days_cols: req_df[col] = pd.Categorical(req_df[col], categories=options)
     edited_request = st.data_editor(req_df, use_container_width=True, key="request_editor")
@@ -101,7 +101,7 @@ with tab3:
     excl_df = get_saved_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(num_days)], columns=user_shifts_list)).reindex(index=[d+1 for d in range(num_days)], columns=user_shifts_list, fill_value=False)
     edited_exclude = st.data_editor(excl_df, use_container_width=True, key="exclude_editor")
 
-    # 保存データの構築
+    # 保存
     total_config_save = {
         "num_mgr": num_mgr, "num_regular": num_regular, "staff_names": final_staff_names,
         "user_shifts": shift_input, "early_shifts": early_shifts, "late_shifts": late_shifts,
@@ -111,9 +111,9 @@ with tab3:
             "prev": edited_prev.to_dict(), "request": edited_request.to_dict(), "exclude": edited_exclude.to_dict()
         }
     }
-    st.sidebar.download_button(label="📥 全ての設定を保存", data=json.dumps(total_config_save, ensure_ascii=False), file_name=f"roster_config.json", mime="application/json")
+    st.sidebar.download_button(label="📥 全設定を保存", data=json.dumps(total_config_save, ensure_ascii=False), file_name=f"roster_config.json", mime="application/json")
 
-    if st.button("🚀 勤務作成を実行する", type="primary"):
+    if st.button("🚀 公平性とリズムを最適化して生成", type="primary"):
         model = cp_model.CpModel()
         num_user_shifts = len(user_shifts_list)
         S_OFF, S_NIKKIN = 0, num_user_shifts + 1
@@ -135,6 +135,7 @@ with tab3:
                 if d_idx == 3: prev_is_late_last.append(val == "遅" or char_to_id.get(val,-1) in l_ids)
             prev_work_matrix.append(row_w)
 
+        # 担務充足
         for d in range(num_days):
             wd_v = calendar.weekday(int(year), int(month), d + 1)
             for idx, s_name in enumerate(user_shifts_list):
@@ -147,10 +148,25 @@ with tab3:
                 else:
                     sk_ok = model.NewBoolVar(f'sk_ok_d{d}_i{sid}')
                     model.Add(skilled_sum == 1).OnlyEnforceIf(sk_ok)
-                    obj_terms.append(sk_ok * 10000000)
+                    obj_terms.append(sk_ok * 20000000)
                     model.Add(trainee_sum <= 1)
 
-        # 個人制約 & リズム最適化
+        # 全体バランス変数の導入（公平性のためのカウント）
+        shift_counts = { (s, i): model.NewIntVar(0, num_days, f'count_s{s}_i{i}') for s in range(total_staff) for i in range(1, num_user_shifts + 1) }
+        for s in range(total_staff):
+            for i in range(1, num_user_shifts + 1):
+                model.Add(shift_counts[(s, i)] == sum(shifts[(s, d, i)] for d in range(num_days)))
+
+        # 担務ごとの公平性（最大回数と最小回数の差を抑制）
+        for i in range(1, num_user_shifts + 1):
+            staff_eligible = [s for s in range(total_staff) if edited_skill.iloc[s, i-1] != "×"]
+            if staff_eligible:
+                max_c = model.NewIntVar(0, num_days, f'max_i{i}')
+                min_c = model.NewIntVar(0, num_days, f'min_i{i}')
+                model.AddMaxEquality(max_c, [shift_counts[(s, i)] for s in staff_eligible])
+                model.AddMinEquality(min_c, [shift_counts[(s, i)] for s in staff_eligible])
+                obj_terms.append((max_c - min_c) * -1000000) # 公平性が崩れるほど大幅減点
+
         for s in range(total_staff):
             is_off_m = [shifts[(s, d, S_OFF)] for d in range(num_days)]
             is_early_m = [model.NewBoolVar(f'ie_{s}_{d}') for d in range(num_days)]
@@ -182,29 +198,21 @@ with tab3:
                 model.Add(sum(hist_w[start_d:start_d+5]) <= 4).OnlyEnforceIf(n5c)
                 obj_terms.append(n5c * 5000000)
 
-            # 【リズム改善1】早遅の切り替え加点（ミキシング促進）
+            # 【リズム：早遅を混ぜるボーナス】
             for d in range(num_days - 1):
                 mix = model.NewBoolVar(f'mix_{s}_{d}')
                 model.AddBoolAnd([is_early_m[d], is_late_m[d+1]]).OnlyEnforceIf(mix)
-                obj_terms.append(mix * 100000)
+                obj_terms.append(mix * 200000)
 
-            # 【リズム改善2】シフトの連続抑制（早番3連・遅番2連に罰則）
+            # 【リズム：早番・遅番の連続抑制（より厳格に）】
             for d in range(num_days - 2):
                 e_streak = model.NewBoolVar(f'es_{s}_{d}')
                 model.AddBoolAnd([is_early_m[d], is_early_m[d+1], is_early_m[d+2]]).OnlyEnforceIf(e_streak)
-                obj_terms.append(e_streak * -300000) # 早番3連は嫌がる
+                obj_terms.append(e_streak * -1000000) # 3連早番は禁止に近い減点
             for d in range(num_days - 1):
                 l_streak = model.NewBoolVar(f'ls_{s}_{d}')
                 model.AddBoolAnd([is_late_m[d], is_late_m[d+1]]).OnlyEnforceIf(l_streak)
-                obj_terms.append(l_streak * -500000) # 遅番2連はもっと嫌がる
-
-            # 【リズム改善3】連休の抑制（1日休みを優先）
-            for d in range(num_days - 1):
-                c_off = model.NewBoolVar(f'coff_{s}_{d}')
-                model.AddBoolAnd([is_off_m[d], is_off_m[d+1]]).OnlyEnforceIf(c_off)
-                # 申し込み以外の連休に罰則
-                if edited_request.iloc[s, d] != "休" and edited_request.iloc[s, d+1] != "休":
-                    obj_terms.append(c_off * -800000)
+                obj_terms.append(l_streak * -2000000) # 2連遅番は絶対に避けたい
 
             if s < num_mgr:
                 for d in range(num_days):
@@ -217,15 +225,24 @@ with tab3:
                 for d in range(num_days):
                     if edited_request.iloc[s, d] != "日": model.Add(shifts[(s, d, S_NIKKIN)] == 0)
 
-            model.Add(sum(is_off_m) == int(edited_hols.iloc[s, 0]))
+            for idx, _ in enumerate(user_shifts_list):
+                t_val = int(edited_trainee_targets.iloc[s, idx])
+                if edited_skill.iloc[s, idx] == "△" and t_val > 0:
+                    model.Add(sum(shifts[(s, d, idx+1)] for d in range(num_days)) == t_val)
+
+            # 公休数（近似）
+            act_h = sum(is_off_m)
+            h_err = model.NewIntVar(0, num_days, f'herr_{s}')
+            model.AddAbsEquality(h_err, act_h - int(edited_hols.iloc[s, 0]))
+            obj_terms.append(h_err * -5000000)
 
         model.Maximize(sum(obj_terms))
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 30.0
+        solver.parameters.max_time_in_seconds = 40.0 # 複雑になったため時間を延長
         status = solver.Solve(model)
 
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("✨ リズムを平準化した勤務表が完成しました！")
+            st.success("✨ 公平性とリズムを完璧に調整しました。")
             res_data = []
             char_map = {S_OFF: "休", S_NIKKIN: "日"}
             for idx, name in enumerate(user_shifts_list): char_map[idx + 1] = name
@@ -241,5 +258,5 @@ with tab3:
                 if val in late_shifts: return 'background-color: #ccffcc'
                 return ''
             st.dataframe(final_df.style.map(color_cells), use_container_width=True)
-            st.download_button("📥 CSV保存", final_df.to_csv().encode('utf-8-sig'), f"roster.csv")
-        else: st.error("⚠️ 解が見つかりません。条件を少し緩めてください。")
+            st.download_button("📥 結果をCSV保存", final_df.to_csv().encode('utf-8-sig'), f"roster.csv")
+        else: st.error("⚠️ 解が見つかりません。")
