@@ -16,7 +16,7 @@ if 'config' not in st.session_state:
         "year": 2025, "month": 1, "saved_tables": {}
     }
 
-st.title("🛡️ 究極の勤務作成エンジン (Legacy-Safe Master V66)")
+st.title("🛡️ 勤務作成エンジン (Legacy-Safe Master V66)")
 
 # --- 2. サイドバー：バックアップと年月 ---
 with st.sidebar:
