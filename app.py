@@ -5,8 +5,9 @@ import json
 from ortools.sat.python import cp_model
 
 # --- 1. 画面基本設定 ---
-st.set_page_config(page_title="世界最高峰 勤務作成AI 究極版", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="究極の勤務作成AI V76", page_icon="🛡️", layout="wide")
 
+# セッション状態の管理
 if 'config' not in st.session_state:
     st.session_state.config = {
         "num_mgr": 2, "num_regular": 8,
@@ -15,17 +16,17 @@ if 'config' not in st.session_state:
         "year": 2025, "month": 1, "saved_tables": {}
     }
 
-st.title("🛡️ 究極の勤務作成エンジン (All-in-One Master V75)")
+st.title("🛡️ 究極の勤務作成エンジン (Stability Verified V76)")
 
-# --- 2. サイドバー：データ管理 ---
+# --- 2. サイドバー：データ保存と復元 ---
 with st.sidebar:
-    st.header("💾 設定の保存と復元")
-    up_file = st.file_uploader("設定ファイルを読み込む(.json)", type="json")
+    st.header("💾 データ保存・復元")
+    up_file = st.file_uploader("設定ファイルを読み込む", type="json")
     if up_file:
         try:
             st.session_state.config.update(json.load(up_file))
             st.success("全てのデータを同期しました。")
-        except: st.error("エラー：ファイル形式が違います。")
+        except: st.error("エラー：ファイル形式が不正です。")
 
     st.divider()
     year = int(st.number_input("年", 2024, 2030, st.session_state.config["year"]))
@@ -49,45 +50,58 @@ with tab_master:
         l_shifts = st.multiselect("遅番グループ", s_list, default=[x for x in s_list if x in st.session_state.config["late_shifts"]])
 
     st.divider()
-    st.subheader("👤 スタッフ詳細マスタ (名前・公休・スキル・回数)")
+    st.subheader("👤 スタッフ詳細マスタ")
     
-    # マスタ表の構築
-    master_cols = ["名前", "公休数"] + [f"{s}スキル" for s in s_list] + [f"{s}見習い回数" for s in s_list]
+    # マスタ表の構築（型エラーを回避するための安全な初期化）
     saved_master = st.session_state.config.get("saved_tables", {}).get("master")
     if saved_master:
         master_df = pd.DataFrame(saved_master)
     else:
-        master_df = pd.DataFrame("", index=range(total), columns=master_cols)
-        for i in range(total):
-            master_df.at[i, "名前"] = f"スタッフ{i+1}"
-            master_df.at[i, "公休数"] = 9
-            for s in s_list:
-                master_df.at[i, f"{s}スキル"] = "○"
-                master_df.at[i, f"{s}見習い回数"] = 0
+        # 初期データを辞書形式で作成（列ごとに型を確定させる）
+        init_data = {
+            "名前": [f"スタッフ{i+1}" for i in range(total)],
+            "公休数": [9] * total
+        }
+        for s in s_list:
+            init_data[f"{s}スキル"] = ["○"] * total
+            init_data[f"{s}見習い回数"] = [0] * total
+        master_df = pd.DataFrame(init_data)
 
-    master_df = master_df.reindex(range(total)).fillna("")
+    # 行数の調整
+    if len(master_df) != total:
+        master_df = master_df.reindex(range(total)).fillna("")
+        for i in range(total):
+            if master_df.at[i, "名前"] == "": master_df.at[i, "名前"] = f"スタッフ{i+1}"
+    
+    # スキル列をプルダウン（カテゴリー型）に変換
     for s in s_list:
-        master_df[f"{s}スキル"] = pd.Categorical(master_df[f"{s}スキル"], categories=["○", "△", "×"])
+        col_name = f"{s}スキル"
+        if col_name in master_df.columns:
+            master_df[col_name] = pd.Categorical(master_df[col_name], categories=["○", "△", "×"])
     
     ed_master = st.data_editor(master_df, use_container_width=True, key="master_ed")
     staff_list = ed_master["名前"].tolist()
 
 with tab_create:
     _, num_days = calendar.monthrange(year, month)
-    # 文法エラー修正：セイウチ演算子を使わない安全な記述
     week_ja = ['月','火','水','木','金','土','日']
     d_cols = [f"{d+1}({week_ja[calendar.weekday(year, month, d+1)]})" for d in range(num_days)]
     
-    # 前月引継ぎ
+    # 3. 前月末状況
     st.subheader("⏮️ 3. 前月末の状況 (直近4日間)")
-    p_days = ["前月4日前", "前月3日前", "前月2日前", "前月末日"]
     saved_p = st.session_state.config.get("saved_tables", {}).get("prev")
-    p_df = pd.DataFrame(saved_p) if saved_p else pd.DataFrame("休", index=staff_list, columns=p_days)
+    p_days = ["前月4日前", "前月3日前", "前月2日前", "前月末日"]
+    if saved_p:
+        p_df = pd.DataFrame(saved_p)
+    else:
+        p_df = pd.DataFrame("休", index=staff_list, columns=p_days)
+    
     p_df = p_df.reindex(index=staff_list, columns=p_days).fillna("休")
-    for col in p_days: p_df[col] = pd.Categorical(p_df[col], categories=["日", "休", "早", "遅"])
-    ed_prev = st.data_editor(p_df, use_container_width=True, key="p_ed")
+    for col in p_days:
+        p_df[col] = pd.Categorical(p_df[col], categories=["日", "休", "早", "遅"])
+    ed_prev = st.data_editor(p_df, use_container_width=True, key="prev_editor")
 
-    # 今月の指定・不要担務
+    # 4. 今月の指定
     st.subheader("📝 4. 今月の勤務指定 ＆ 🚫 不要設定")
     c_req, c_ex = st.columns([3, 1])
     with c_req:
@@ -95,7 +109,8 @@ with tab_create:
         saved_r = st.session_state.config.get("saved_tables", {}).get("request")
         r_df = pd.DataFrame(saved_r) if saved_r else pd.DataFrame("", index=staff_list, columns=d_cols)
         r_df = r_df.reindex(index=staff_list, columns=d_cols).fillna("")
-        for col in d_cols: r_df[col] = pd.Categorical(r_df[col], categories=status_opts)
+        for col in d_cols:
+            r_df[col] = pd.Categorical(r_df[col], categories=status_opts)
         ed_req = st.data_editor(r_df, use_container_width=True, key="r_ed")
     with c_ex:
         saved_ex = st.session_state.config.get("saved_tables", {}).get("exclude")
@@ -103,7 +118,7 @@ with tab_create:
         ex_df = ex_df.reindex(index=[d+1 for d in range(num_days)], columns=s_list).fillna(False)
         ed_ex = st.data_editor(ex_df, use_container_width=True, key="ex_ed")
 
-    # 保存データ更新
+    # 保存データ同期
     st.session_state.config.update({
         "num_mgr": n_mgr, "num_regular": n_reg, "staff_names": staff_list, "user_shifts": raw_s,
         "early_shifts": e_shifts, "late_shifts": l_shifts, "year": year, "month": month,
@@ -111,7 +126,7 @@ with tab_create:
             "master": ed_master.to_dict(), "prev": ed_prev.to_dict(), "request": ed_req.to_dict(), "exclude": ed_ex.to_dict()
         }
     })
-    st.sidebar.download_button("📥 設定を保存する", json.dumps(st.session_state.config, ensure_ascii=False), f"config_{year}_{month}.json")
+    st.sidebar.download_button("📥 全設定を保存する", json.dumps(st.session_state.config, ensure_ascii=False), f"config_{year}_{month}.json")
 
     if st.button("🚀 究極の最適化を実行する", type="primary"):
         model = cp_model.CpModel()
@@ -120,7 +135,7 @@ with tab_create:
         E_IDS = [s_list.index(x) + 1 for x in e_shifts]
         L_IDS = [s_list.index(x) + 1 for x in l_shifts]
         
-        # 変数定義 (staff, day, shift_id)
+        # 変数定義
         x = {}
         for s in range(total):
             for d in range(num_days):
@@ -128,19 +143,10 @@ with tab_create:
                     x[s, d, i] = model.NewBoolVar(f'x_{s}_{d}_{i}')
         
         penalty = []
+        c_to_id = {"休": S_OFF, "日": S_NIK, "": -1}
+        for i_s, n_s in enumerate(s_list): c_to_id[n_s] = i_s + 1
 
-        # 前月データ解析
-        prev_is_w, prev_is_l, prev_is_o = [], [], []
-        for s in range(total):
-            pw, pl, po = [], [], []
-            for d_idx in range(4):
-                val = ed_prev.iloc[s, d_idx]
-                pw.append(1 if val != "休" else 0)
-                pl.append(1 if val == "遅" else 0)
-                po.append(1 if val == "休" else 0)
-            prev_is_w.append(pw); prev_is_l.append(pl); prev_is_o.append(po)
-
-        # 担務充足
+        # 各日の充足
         for d in range(num_days):
             wd = calendar.weekday(year, month, d+1)
             for i, s_name in enumerate(s_list):
@@ -150,13 +156,12 @@ with tab_create:
                 trainees = [s for s in range(total) if ed_master.iloc[s, i+2] == "△"]
                 s_sum = sum(x[s, d, sid] for s in skilled)
                 t_sum = sum(x[s, d, sid] for s in trainees)
-                if is_ex:
-                    model.Add(s_sum + t_sum == 0)
+                if is_ex: model.Add(s_sum + t_sum == 0)
                 else:
-                    model.Add(s_sum == 1) # 戦力は必ず1人
-                    model.Add(t_sum <= 1) # 見習いは任意
+                    model.Add(s_sum == 1)
+                    model.Add(t_sum <= 1)
 
-        # 個人別・リズム・公平性
+        # 個人制約とリズム
         for s in range(total):
             is_e = [model.NewBoolVar(f'ise_{s}_{d}') for d in range(num_days)]
             is_l = [model.NewBoolVar(f'isl_{s}_{d}') for d in range(num_days)]
@@ -170,52 +175,38 @@ with tab_create:
                 model.Add(sum(x[s, d, i] for i in L_IDS) == 0).OnlyEnforceIf(is_l[d].Not())
 
                 req = ed_req.iloc[s, d]
-                c_to_id = {"休": S_OFF, "日": S_NIK, "": -1}
-                for i_s, n_s in enumerate(s_list): c_to_id[n_s] = i_s + 1
                 if req in c_to_id and req != "": model.Add(x[s, d, c_to_id[req]] == 1)
-                
-                # スキル×禁止
                 for i_s, _ in enumerate(s_list):
                     if ed_master.iloc[s, i_s+2] == "×": model.Add(x[s, d, i_s+1] == 0)
 
-                # 遅早禁止
-                if d < num_days - 1:
-                    model.Add(is_l[d] + is_e[d+1] <= 1)
-                if d == 0 and prev_is_l[s][-1] == 1:
+                if d < num_days - 1: model.Add(is_l[d] + is_e[d+1] <= 1)
+                # 月またぎ
+                if d == 0 and (ed_prev.iloc[s, 3] == "遅" or (ed_prev.iloc[s, 3] in l_shifts)):
                     model.Add(is_e[0] == 0)
 
-            # 連勤制限(4日)
-            this_work = [(1 - is_off[d]) for d in range(num_days)]
-            full_w = prev_is_w[s] + this_work
-            for start_d in range(len(full_w)-4):
-                model.Add(sum(full_w[start_d:start_d+5]) <= 4)
+            # 連勤制限
+            history_w = [1 if ed_prev.iloc[s, k] != "休" else 0 for k in range(4)] + [(1 - is_off[d]) for d in range(num_days)]
+            for start_d in range(len(history_w)-4): model.Add(sum(history_w[start_d:start_d+5]) <= 4)
 
-            # リズム・ミキシング
+            # リズムと連休
             for d in range(num_days - 1):
                 mix_b = model.NewBoolVar(f'mix_{s}_{d}')
                 model.AddBoolAnd([is_e[d], is_l[d+1]]).OnlyEnforceIf(mix_b)
                 penalty.append(mix_b * 5000000)
-            
-            # カテゴリ連続抑制
             for d in range(num_days - 2):
                 e3 = model.NewBoolVar(f'e3_{s}_{d}')
                 model.AddBoolAnd([is_e[d], is_e[d+1], is_e[d+2]]).OnlyEnforceIf(e3)
                 penalty.append(e3 * -1000000)
-            for d in range(num_days - 1):
-                l2 = model.NewBoolVar(f'l2_{s}_{d}')
-                model.AddBoolAnd([is_l[d], is_l[d+1]]).OnlyEnforceIf(l2)
-                penalty.append(l2 * -2000000)
-
-            # 休み分散 (指定なし3連休禁止)
-            full_o = prev_is_o[s] + is_off
-            for start_d in range(len(full_o) - 2):
+            
+            # 指定なし3連休禁止
+            history_o = [1 if ed_prev.iloc[s, k] == "休" else 0 for k in range(4)] + is_off
+            for start_d in range(len(history_o) - 2):
                 is_3o = model.NewBoolVar(f'i3o_{s}_{start_d}')
-                model.AddBoolAnd(full_o[start_d:start_d+3]).OnlyEnforceIf(is_3o)
+                model.AddBoolAnd(history_o[start_d:start_d+3]).OnlyEnforceIf(is_3o)
                 c_idx = [start_d+k-4 for k in range(3) if 0 <= start_d+k-4 < num_days]
                 if c_idx and not any(ed_req.iloc[s, k] == "休" for k in c_idx):
                     penalty.append(is_3o * -8000000)
 
-            # 管理者・一般
             if s < n_mgr:
                 for d in range(num_days):
                     wd_v = calendar.weekday(year, month, d+1)
@@ -227,20 +218,18 @@ with tab_create:
                 for d in range(num_days):
                     if ed_req.iloc[s, d] != "日": model.Add(x[s, d, S_NIK] == 0)
 
-            # 見習い回数・公休数
+            # 見習い回数
             for i_s, _ in enumerate(s_list):
-                t_val_raw = ed_master.iloc[s, i_s + 2 + num_s_types]
-                t_val = int(t_val_raw) if t_val_raw != "" else 0
+                t_val = int(ed_master.iloc[s, i_s + 2 + num_s_types] or 0)
                 if ed_master.iloc[s, i_s+2] == "△" and t_val > 0:
                     model.Add(sum(x[s, d, i_s+1] for d in range(num_days)) == t_val)
-            
             model.Add(sum(is_off) == int(ed_master.iloc[s, 1]))
 
         # 公平性
         for i_s in range(1, num_s_types + 1):
             sc = [model.NewIntVar(0, num_days, f'sc_{s}_{i_s}') for s in range(total)]
             for s in range(total): model.Add(sc[s] == sum(x[s, d, i_s] for d in range(num_days)))
-            mx, mn = model.NewIntVar(0, num_days, f'mx_{i_s}'), model.NewIntVar(0, num_days, f'mn_{i_s}')
+            mx, mn = model.NewIntVar(0, num_days, f'mx_{i_s}'), model.NewIntVar(0, num_days, f'min_{i_s}')
             model.AddMaxEquality(mx, sc); model.AddMinEquality(mn, sc)
             penalty.append((mx - mn) * -2000000)
 
@@ -250,7 +239,7 @@ with tab_create:
         status = solver.Solve(model)
 
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("✨ 条件をすべて統合した究極の解を抽出しました。")
+            st.success("✨ 最適解を抽出しました。")
             res_data = []
             char_map = {S_OFF: "休", S_NIK: "日"}
             for i_s, n_s in enumerate(s_list): char_map[i_s+1] = n_s
@@ -266,4 +255,4 @@ with tab_create:
                 return 'background-color: #ccffcc'
             st.dataframe(final_df.style.map(clr), use_container_width=True)
             st.download_button("📥 CSV保存", final_df.to_csv().encode('utf-8-sig'), "roster.csv")
-        else: st.error("⚠️ 解が見つかりません。公休数やスキルの設定に無理がないか確認してください。")
+        else: st.error("⚠️ 解が見つかりません。公休数やスキルの設定を調整してください。")
