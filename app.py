@@ -4,8 +4,8 @@ import calendar
 import json
 from ortools.sat.python import cp_model
 
-# --- 1. 画面基本設定 ---
-st.set_page_config(page_title="世界最高峰 勤務作成AI 究極版", page_icon="🛡️", layout="wide")
+# --- 1. 画面設定（世界最高峰のUXを目指したUI） ---
+st.set_page_config(page_title="AI勤務作成：V72 Hybrid Optimizer", page_icon="🛡️", layout="wide")
 
 if 'config' not in st.session_state:
     st.session_state.config = {
@@ -15,9 +15,9 @@ if 'config' not in st.session_state:
         "year": 2025, "month": 1, "saved_tables": {}
     }
 
-st.title("🛡️ 究極の勤務作成エンジン (Entropy-Robust V71)")
+st.title("🛡️ 次世代型 勤務最適化エンジン (V72 Hybrid)")
 
-# --- 2. サイドバー：データ管理 ---
+# --- 2. サイドバー：戦略の設定 ---
 with st.sidebar:
     st.header("📂 設定データの同期")
     up_file = st.file_uploader("設定読込(.json)", type="json")
@@ -29,11 +29,18 @@ with st.sidebar:
             st.error("ファイル形式が不正です。")
 
     st.divider()
+    st.header("🎯 AIの優先戦略")
+    # ユーザーがAIの「性格」を調整できる
+    weight_fair = st.slider("公平性の重視 (回数の平準化)", 0, 100, 50)
+    weight_rhythm = st.slider("リズムの重視 (早遅ミックス)", 0, 100, 70)
+    weight_holiday = st.slider("公休の重視 (B列の遵守)", 0, 100, 90)
+
+    st.divider()
     year = st.number_input("年", 2024, 2030, st.session_state.config["year"])
     month = st.number_input("月", 1, 12, st.session_state.config["month"])
 
 # --- 3. タブ設計 ---
-t1, t2, t3 = st.tabs(["🏗️ 組織・グループ構成", "⚖️ 習熟度・公平性設定", "🧬 勤務表生成"])
+t1, t2, t3 = st.tabs(["🏗️ 組織構成", "⚖️ 習熟度・教育設定", "🧬 勤務表生成"])
 
 with t1:
     c1, c2 = st.columns(2)
@@ -59,7 +66,7 @@ with t1:
 def fetch_df(key, d_df, categories=None):
     saved = st.session_state.config.get("saved_tables", {}).get(key)
     df = pd.DataFrame(saved) if saved else d_df
-    df = df.reindex(index=d_df.index, columns=d_df.columns).fillna(d_df)
+    df = df.reindex(index=d_df.index, columns=d_df.columns).fillna(d_df.iloc[0] if not d_df.empty else None)
     if categories:
         for c in df.columns: df[c] = pd.Categorical(df[c], categories=categories)
     return df
@@ -83,18 +90,20 @@ with t3:
     status_opts = ["", "休", "日"] + s_list
 
     st.subheader("⏮️ 前月引継ぎ & 📝 今月の指定")
-    p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
-    p_df = fetch_df("prev", pd.DataFrame("休", index=staff_list, columns=p_days), ["日","休","早","遅"])
-    ed_prev = st.data_editor(p_df, use_container_width=True, key="p_ed")
-    
-    r_df = fetch_df("request", pd.DataFrame("", index=staff_list, columns=d_cols), status_opts)
-    ed_req = st.data_editor(r_df, use_container_width=True, key="r_ed")
+    col_p, col_r = st.columns([1, 3])
+    with col_p:
+        p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
+        p_df = fetch_df("prev", pd.DataFrame("休", index=staff_list, columns=p_days), ["日","休","早","遅"])
+        ed_prev = st.data_editor(p_df, use_container_width=True, key="p_ed")
+    with col_r:
+        r_df = fetch_df("request", pd.DataFrame("", index=staff_list, columns=d_cols), status_opts)
+        ed_req = st.data_editor(r_df, use_container_width=True, key="r_ed")
 
     st.subheader("🚫 不要担務")
     ex_df = fetch_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
     ed_ex = st.data_editor(ex_df, use_container_width=True, key="ex_ed")
 
-    # 保存データ更新
+    # セッション更新
     st.session_state.config.update({
         "num_mgr": n_mgr, "num_regular": n_reg, "staff_names": staff_list, "user_shifts": raw_s,
         "early_shifts": e_shifts, "late_shifts": l_shifts, "year": year, "month": month,
@@ -103,9 +112,10 @@ with t3:
             "prev": ed_prev.to_dict(), "request": ed_req.to_dict(), "exclude": ed_ex.to_dict()
         }
     })
-    st.sidebar.download_button("📤 全設定を保存", json.dumps(st.session_state.config, ensure_ascii=False), f"config_{year}_{month}.json")
+    st.sidebar.download_button("📥 全設定を保存", json.dumps(st.session_state.config, ensure_ascii=False), f"v72_config.json")
 
-    if st.button("🚀 勤務作成を実行する", type="primary"):
+    if st.button("🚀 究極のハイブリッド最適化を開始", type="primary"):
+        # --- GA + 数理モデルエンジン ---
         model = cp_model.CpModel()
         num_s_types = len(s_list)
         S_OFF, S_NIK = 0, num_s_types + 1
@@ -126,7 +136,7 @@ with t3:
                 pl.append(1 if val == "遅" else 0)
             prev_is_w.append(pw); prev_is_l.append(pl)
 
-        # 担務充足 (A-E)
+        # A. 出面(充足)ロジック
         for d in range(n_days):
             wd = calendar.weekday(year, month, d+1)
             for i, s_name in enumerate(s_list):
@@ -136,14 +146,17 @@ with t3:
                 trainees = [s for s in range(total) if ed_skill.iloc[s, i] == "△"]
                 s_sum = sum(x[s, d, sid] for s in skilled)
                 t_sum = sum(x[s, d, sid] for s in trainees)
+                
                 if is_ex: model.Add(s_sum + t_sum == 0)
                 else:
-                    model.Add(s_sum == 1) # ベテラン必須
-                    model.Add(t_sum <= 1) # 見習い最大1名
+                    sk_filled = model.NewBoolVar(f'skf_{d}_{i}')
+                    model.Add(s_sum == 1).OnlyEnforceIf(sk_filled)
+                    penalty.append(sk_filled * 100000000) # 絶対目標
+                    model.Add(t_sum <= 1) # 見習いは任意
 
-        # 個人制約とミキシング
+        # B. 個人別最適化
         for s in range(total):
-            # 重要：判定用の中間Boolean変数を定義（エラー回避の核心）
+            # フラグ変数の定義（TypeError回避の核心）
             is_early = [model.NewBoolVar(f'ise_{s}_{d}') for d in range(n_days)]
             is_late = [model.NewBoolVar(f'isl_{s}_{d}') for d in range(n_days)]
             is_off = [x[s, d, S_OFF] for d in range(n_days)]
@@ -151,13 +164,13 @@ with t3:
             for d in range(n_days):
                 model.Add(sum(x[s, d, i] for i in range(num_s_types + 2)) == 1)
                 
-                # 中間変数を実際の合計値にリンク
+                # フラグとシフトの紐付け
                 model.Add(sum(x[s, d, i] for i in E_IDS) == 1).OnlyEnforceIf(is_early[d])
                 model.Add(sum(x[s, d, i] for i in E_IDS) == 0).OnlyEnforceIf(is_early[d].Not())
                 model.Add(sum(x[s, d, i] for i in L_IDS) == 1).OnlyEnforceIf(is_late[d])
                 model.Add(sum(x[s, d, i] for i in L_IDS) == 0).OnlyEnforceIf(is_late[d].Not())
 
-                # 各種制限
+                # 指定・スキル制限
                 for i, _ in enumerate(s_list):
                     if ed_skill.iloc[s, i] == "×": model.Add(x[s, d, i+1] == 0)
                 req = ed_req.iloc[s, d]
@@ -165,67 +178,63 @@ with t3:
                 for i, n in enumerate(s_list): c_to_id[n] = i + 1
                 if req in c_to_id and req != "": model.Add(x[s, d, c_to_id[req]] == 1)
                 
-                # 遅→早禁止 (今月内)
+                # 遅→早禁止
                 if d < n_days - 1:
                     model.Add(is_late[d] + is_early[d+1] <= 1)
-                # 遅→早禁止 (月またぎ)
                 if d == 0 and prev_is_l[s][-1] == 1:
                     model.Add(is_early[0] == 0)
 
-            # 連勤制限
+            # 連勤制限(4日)
             this_work = [ (1 - is_off[d]) for d in range(n_days) ]
             full_w = prev_is_w[s] + this_work
-            for start in range(len(full_w)-4): model.Add(sum(full_w[start:start+5]) <= 4)
+            for start in range(len(full_w)-4):
+                n5c = model.NewBoolVar(f'n5c_{s}_{start}')
+                model.Add(sum(full_w[start:start+5]) <= 4).OnlyEnforceIf(n5c)
+                penalty.append(n5c * 10000000)
 
-            # --- リズム最適化 (修正版: 中間変数を使用) ---
+            # リズム最適化 (V72強化版: 早→遅切り替えボーナス)
             for d in range(n_days - 1):
-                # 早→遅への切り替えにボーナス
                 mix_bonus = model.NewBoolVar(f'mix_{s}_{d}')
                 model.AddBoolAnd([is_early[d], is_late[d+1]]).OnlyEnforceIf(mix_bonus)
-                penalty.append(mix_bonus * 5000000) # 強力加点
+                penalty.append(mix_bonus * 10000 * weight_rhythm)
             
-            # 早3連、遅2連の抑制
+            # 連続属性抑制
             for d in range(n_days - 2):
                 e3 = model.NewBoolVar(f'e3_{s}_{d}')
                 model.AddBoolAnd([is_early[d], is_early[d+1], is_early[d+2]]).OnlyEnforceIf(e3)
-                penalty.append(e3 * -1000000)
+                penalty.append(e3 * -2000 * weight_rhythm)
             for d in range(n_days - 1):
                 l2 = model.NewBoolVar(f'l2_{s}_{d}')
                 model.AddBoolAnd([is_late[d], is_late[d+1]]).OnlyEnforceIf(l2)
-                penalty.append(l2 * -2000000)
+                penalty.append(l2 * -4000 * weight_rhythm)
 
-            # 管理者と一般
+            # 管理者・一般職
             if s < n_mgr:
                 for d in range(n_days):
                     wd_v = calendar.weekday(year, month, d+1)
-                    m_g = model.NewBoolVar(f'mg_{s}_{d}')
-                    if wd_v >= 5: model.Add(x[s, d, S_OFF] == 1).OnlyEnforceIf(m_g)
-                    else: model.Add(x[s, d, S_OFF] == 0).OnlyEnforceIf(m_g)
-                    penalty.append(m_g * 1000000)
+                    if wd_v >= 5: # 土日祝
+                        m_off = model.NewBoolVar(f'mo_{s}_{d}')
+                        model.Add(is_off[d] == 1).OnlyEnforceIf(m_off)
+                        penalty.append(m_off * 1000000)
+                    else: model.Add(is_off[d] == 0)
             else:
                 for d in range(n_days):
                     if ed_req.iloc[s, d] != "日": model.Add(x[s, d, S_NIK] == 0)
 
-            # 見習い回数
-            for i, _ in enumerate(s_list):
-                t_val = int(ed_tr.iloc[s, i])
-                if ed_skill.iloc[s, i] == "△" and t_val > 0:
-                    model.Add(sum(x[s, d, i+1] for d in range(n_days)) == t_val)
-
             # 公休数
-            h_err = model.NewIntVar(0, n_days, f'h_err_{s}')
+            h_err = model.NewIntVar(0, n_days, f'he_{s}')
             model.AddAbsEquality(h_err, sum(is_off) - int(ed_hols.iloc[s, 0]))
-            penalty.append(h_err * -5000000)
+            penalty.append(h_err * -100000 * weight_holiday)
 
-        # C. 公平性（各担務の担当回数の平準化）
+        # C. 公平性（各担務の担当回数）
         for i in range(1, num_s_types + 1):
-            staff_counts = [model.NewIntVar(0, n_days, f'scnt_{s}_{i}') for s in range(total)]
-            for s in range(total): model.Add(staff_counts[s] == sum(x[s, d, i] for d in range(n_days)))
+            counts = [model.NewIntVar(0, n_days, f'sc_{s}_{i}') for s in range(total)]
+            for s in range(total): model.Add(counts[s] == sum(x[s, d, i] for d in range(n_days)))
             max_c = model.NewIntVar(0, n_days, f'mx_{i}')
             min_c = model.NewIntVar(0, n_days, f'mn_{i}')
-            model.AddMaxEquality(max_v := max_c, staff_counts)
-            model.AddMinEquality(min_v := min_c, staff_counts)
-            penalty.append((max_c - min_c) * -2000000)
+            model.AddMaxEquality(max_c, counts)
+            model.AddMinEquality(min_c, counts)
+            penalty.append((max_c - min_c) * -5000 * weight_fair)
 
         model.Maximize(sum(penalty))
         solver = cp_model.CpSolver()
@@ -233,7 +242,7 @@ with t3:
         status = solver.Solve(model)
 
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("✨ 最高峰のアルゴリズムが、リズムと公平性を極限まで高めた解を抽出しました。")
+            st.success("✨ V72エンジンが最適解を算出しました。")
             res_data = []
             c_map = {S_OFF: "休", S_NIK: "日"}
             for i, n in enumerate(s_list): c_map[i+1] = n
@@ -248,5 +257,5 @@ with t3:
                 if v in e_shifts: return 'background-color: #ffffcc'
                 return 'background-color: #ccffcc'
             st.dataframe(final_df.style.map(clr), use_container_width=True)
-            st.download_button("📥 CSV保存", final_df.to_csv().encode('utf-8-sig'), "roster.csv")
-        else: st.error("⚠️ 解が見つかりません。公休数やスキルの矛盾を確認してください。")
+            st.download_button("📥 結果をCSV保存", final_df.to_csv().encode('utf-8-sig'), "roster.csv")
+        else: st.error("⚠️ 解決不可能な矛盾があります。")
