@@ -160,7 +160,7 @@ with tab_roster:
 
     st.sidebar.download_button("📥 現在の全設定を保存する", json.dumps(st.session_state.config, ensure_ascii=False), f"v80_backup_{year}_{month}.json")
 
-    # --- 数理最適化開始（フォーム外に設置することでセッションデータから独立して起動） ---
+    # --- 数理最適化開始 ---
     st.divider()
     st.subheader("🧬 勤務表作成エンジンの実行")
     st.info("※入力テーブルの値を変更した場合は、必ず上部の「保存する」ボタンを押してから実行してください。")
@@ -197,7 +197,8 @@ with tab_roster:
         # 日次の基本ループ
         for d in range(n_days):
             wd = calendar.weekday(year, month, d+1)
-            # A. 担務充足 (Soft Constraint)
+            
+            # A. 担務充足 (ご要望に合わせ強制約化：1日各シフトにちょうど1人)
             for i, s_name in enumerate(s_list):
                 sid = i + 1
                 is_excl = opt_ex.iloc[d, i] or (wd == 6 and s_name == "C")
@@ -206,12 +207,17 @@ with tab_roster:
                 s_sum = sum(x[s, d, sid] for s in skilled)
                 t_sum = sum(x[s, d, sid] for s in trainee)
                 
-                if is_excl: model.Add(s_sum + t_sum == 0)
+                if is_excl:
+                    model.Add(s_sum + t_sum == 0)
                 else:
-                    job_f = model.NewBoolVar(f'job_{d}_{i}')
-                    model.Add(s_sum == 1).OnlyEnforceIf(job_f)
-                    score_objs.append(job_f * 5000000) 
-                    model.Add(t_sum <= 1)
+                    # 対象シフトに入るスタッフは「ちょうど1人」に制限
+                    model.Add(s_sum + t_sum == 1)
+
+                    # 見習い（△）がこのシフトに入る場合、同日の他シフトにベテラン（いずれかのシフトで「○」を持つ人）が1人以上出勤していることを保証する
+                    for s_t in trainee:
+                        all_skilled_staff = [s for s in range(total) if "○" in opt_skill.iloc[s].values]
+                        veteran_on_duty = sum(x[s, d, other_sid] for s in all_skilled_staff for other_sid in range(1, num_types+1))
+                        model.Add(veteran_on_duty >= 1).OnlyEnforceIf(x[s_t, d, sid])
 
             # 1日1人1回 (Hard Constraint)
             for s in range(total): model.Add(sum(x[s, d, i] for i in range(num_types+2)) == 1)
@@ -312,4 +318,4 @@ with tab_roster:
             st.dataframe(res_df.style.map(cl), use_container_width=True)
             st.download_button("📥 ダウンロード", res_df.to_csv().encode('utf-8-sig'), "roster.csv")
         else: 
-            st.error("解が見つかりませんでした。入力制約が競合していないか確認してください。（例：管理者が平日に希望休を出しているなど）")
+            st.error("解が見つかりませんでした。入力制約が競合していないか確認してください。（例：管理者が平日に希望休を出している、または合計人数がシフト数に足りないなど）")
