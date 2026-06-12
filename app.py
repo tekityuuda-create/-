@@ -33,12 +33,13 @@ with st.sidebar:
     w_h_rule = st.slider("ルールの厳守度", 0, 100, 95)
     w_mixing = st.slider("早遅ミキシング（バランス）", 0, 100, 70)
     w_fair = st.slider("担当回数の公平性", 0, 100, 50)
+    w_holiday = st.slider("公休数の厳守度", 0, 100, 80) # 追加：未定義エラー対策
 
     st.divider()
     year = int(st.number_input("年", 2024, 2030, st.session_state.config["year"]))
     month = int(st.number_input("月", 1, 12, st.session_state.config["month"]))
 
-# --- 3. UIの統合タブ構成 ---
+# --- 3. UI of the integrated tab structure ---
 tab_st, tab_skl, tab_roster = st.tabs(["🏗️ 1. 組織と勤務の構成", "⚖️ 2. 公休・スキル・回数", "🧬 3. 勤務表の最適化"])
 
 def get_persisted_df(key, d_df, categories=None):
@@ -122,6 +123,9 @@ with tab_roster:
         E_IDS = [s_list.index(x) + 1 for x in early_gr]
         L_IDS = [s_list.index(x) + 1 for x in late_gr]
         
+        # 変数マッピング
+        w_rhythm = w_mixing # 追加：未定義エラー対策
+        
         # 変数: x[スタッフ, 日, シフト]
         x = {(s, d, i): model.NewBoolVar(f'x_{s}_{d}_{i}') for s in range(total) for d in range(n_days) for i in range(num_types + 2)}
         score_objs = []
@@ -194,10 +198,11 @@ with tab_roster:
                 mix = model.NewBoolVar(f'mix_{s}_{di}')
                 model.AddBoolAnd([is_early[di], is_late[di+1]]).OnlyEnforceIf(mix)
                 score_objs.append(mix * 500 * w_rhythm)
-                # 連属性抑制
+                
+                # 連属性抑制（修正：3連早番時に e_block を 1 に強制する論理関係を線形制約で表現）
                 if di < n_days - 2:
                     e_block = model.NewBoolVar(f'eb_{s}_{di}')
-                    model.AddBoolAnd([is_early[di], is_early[di+1], is_early[di+2]]).OnlyEnforceIf(e_block)
+                    model.Add(is_early[di] + is_early[di+1] + is_early[di+2] - 2 <= e_block)
                     score_objs.append(e_block * -1000 * w_rhythm)
 
             # 管理者・一般職の聖域
@@ -208,16 +213,21 @@ with tab_roster:
                         m_o = model.NewBoolVar(f'mo_{s}_{di}')
                         model.Add(is_off[di] == 1).OnlyEnforceIf(m_o)
                         score_objs.append(m_o * 10000)
-                    else: model.Add(is_off[di] == 0) # 平日は基本出勤(絶対制約からSoftへも変更可だがまずは固定)
+                    else: 
+                        # 注：管理者が平日に「休」の希望を出すと、以下の制約と矛盾して解なし（Infeasible）になります
+                        model.Add(is_off[di] == 0) 
             else:
                 for di in range(n_days):
                     if ed_req.iloc[s, di] != "日": model.Add(x[s, di, S_NIK] == 0)
 
-            # 公休数不一致を罰則化（これが「解が見つからない」を救う）
+            # 公休数不一致を罰則化（修正：線形式を直接 AddAbsEquality に渡さず、中間変数 h_diff_raw を経由）
             target_h_count = int(ed_hols.iloc[s, 0])
             act_h_count = sum(is_off)
+            h_diff_raw = model.NewIntVar(-n_days, n_days, f'hdr_{s}')
+            model.Add(h_diff_raw == act_h_count - target_h_count)
+            
             h_diff = model.NewIntVar(0, n_days, f'hd_{s}')
-            model.AddAbsEquality(h_diff, act_h_count - target_h_count)
+            model.AddAbsEquality(h_diff, h_diff_raw)
             score_objs.append(h_diff * -50000 * w_holiday)
 
         # C. 担務平準化（公平性）
@@ -234,7 +244,7 @@ with tab_roster:
         status = slv.Solve(model)
 
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("✨ 世界最高水準の調整が完了しました。")
+            st.success("✨ 勤務作成と調整が完了しました。")
             res_rows = []
             id_char = {S_OFF: "休", S_NIK: "日"}
             for i, n in enumerate(s_list): id_char[i+1] = n
@@ -249,4 +259,5 @@ with tab_roster:
                 return 'background-color: #ccffcc'
             st.dataframe(res_df.style.map(cl), use_container_width=True)
             st.download_button("📥 ダウンロード", res_df.to_csv().encode('utf-8-sig'), "roster.csv")
-        else: st.error("致命的なパニック。全変数を解放しても解が見つかりませんでした。基本構成を再確認してください。")
+        else: 
+            st.error("解が見つかりませんでした。入力制約が競合していないか確認してください。（例：管理者が平日に希望休を出しているなど）")
