@@ -119,16 +119,27 @@ with tab_skl:
             tr_df = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=tr_cols))
             ed_trainee = st.data_editor(tr_df, use_container_width=True, key="tr_ed")
         with col_c2:
-            st.subheader("⏱️ 各担務の残業時間設定 (時間)")
+            st.subheader("⏱️ 各担務の残業時間設定 (分)")
+            st.write("※1時間半なら 90 と入力してください")
             ot_indices = list(s_list)
             if "C" in s_list and "D" in s_list and "F" not in ot_indices:
                 ot_indices.append("F")
+            
             default_overtime = pd.DataFrame(
-                [1.5, 1.0, 2.0, 2.5, 1.0, 3.0][:len(ot_indices)], 
+                [90, 60, 120, 150, 60, 180][:len(ot_indices)], 
                 index=ot_indices, 
-                columns=["残業時間(時間)"]
+                columns=["残業時間(分)"]
             )
             ot_df = get_persisted_df("overtime", default_overtime)
+            
+            # 古いデータ（時間表記）を読み込んだ場合の自動変換・救済処理
+            if "残業時間(時間)" in ot_df.columns and "残業時間(分)" not in ot_df.columns:
+                ot_df["残業時間(分)"] = (ot_df["残業時間(時間)"] * 60).fillna(60).astype(int)
+                ot_df = ot_df.drop(columns=["残業時間(時間)"])
+            if "残業時間(分)" not in ot_df.columns:
+                ot_df["残業時間(分)"] = 60
+            ot_df = ot_df.reindex(columns=["残業時間(分)"])
+            
             ed_overtime = st.data_editor(ot_df, use_container_width=True, key="ot_ed")
             
         submitted_skl = st.form_submit_button("⚖️ スキル・公休・残業の設定を保存する")
@@ -193,11 +204,6 @@ with tab_roster:
 
         num_types_extended = len(s_list_extended)
         
-        # シフトIDの割当：
-        # 0: 休 (S_OFF)
-        # 1〜num_types_extended: 各実働シフト (A, B, C, D, E, F)
-        # num_types_extended + 1: 日勤 (S_NIK)
-        # num_types_extended + 2: 調整休日 (S_CHOU)
         S_OFF = 0
         S_NIK = num_types_extended + 1
         S_CHOU = num_types_extended + 2
@@ -219,7 +225,14 @@ with tab_roster:
         ot_indices = list(s_list)
         if has_C_and_D and "F" not in ot_indices:
             ot_indices.append("F")
-        opt_overtime = pd.DataFrame(saved.get("overtime")).reindex(ot_indices).fillna(1.0)
+        
+        # 残業設定のロードと互換性処理
+        raw_ot = pd.DataFrame(saved.get("overtime")).reindex(ot_indices)
+        if "残業時間(時間)" in raw_ot.columns and "残業時間(分)" not in raw_ot.columns:
+            raw_ot["残業時間(分)"] = (raw_ot["残業時間(時間)"] * 60).fillna(60).astype(int)
+        if "残業時間(分)" not in raw_ot.columns:
+            raw_ot["残業時間(分)"] = 60
+        opt_overtime = raw_ot.fillna(60)
 
         # Fシフト用スキル判定関数
         def get_skill_for_F(s_idx):
@@ -321,7 +334,7 @@ with tab_roster:
             for d in range(n_days):
                 model.Add(is_off[d] == x[s, d, S_OFF] + x[s, d, S_CHOU])
             
-            # 月間残業時間の計算 (分単位にスケール化して整数計算)
+            # 月間残業時間の計算 (直接分単位で整数計算)
             ot_vars = []
             for d in range(n_days):
                 wd = calendar.weekday(year, month, d+1)
@@ -329,8 +342,7 @@ with tab_roster:
                 
                 for i, s_name in enumerate(s_list_extended):
                     sid = i + 1
-                    val_h = float(opt_overtime.loc[s_name, "残業時間(時間)"])
-                    mins = int(round(val_h * 60))
+                    val_mins = int(opt_overtime.loc[s_name, "残業時間(分)"])
                     
                     if wd == 6:  # 日曜日は全担務残業なし
                         ot_mins_by_shift[sid] = 0
@@ -338,9 +350,9 @@ with tab_roster:
                         if s_name in ["A", "B"]:
                             ot_mins_by_shift[sid] = 0
                         else:
-                            ot_mins_by_shift[sid] = mins
+                            ot_mins_by_shift[sid] = val_mins
                     else:  # 平日
-                        ot_mins_by_shift[sid] = mins
+                        ot_mins_by_shift[sid] = val_mins
                 
                 # 休(S_OFF), 日勤(S_NIK), 調整休日(S_CHOU) は残業0分
                 ot_mins_by_shift[S_OFF] = 0
@@ -450,14 +462,14 @@ with tab_roster:
                     assigned_char = res_rows[s][d]
                     if assigned_char in s_list_extended:
                         wd = calendar.weekday(year, month, d+1)
-                        val_h = float(opt_overtime.loc[assigned_char, "残業時間(時間)"])
+                        val_mins = int(opt_overtime.loc[assigned_char, "残業時間(分)"])
                         # 曜日例外ルール評価
                         if wd == 6:
                             total_ot_mins += 0
                         elif wd == 5 and assigned_char in ["A", "B"]:
                             total_ot_mins += 0
                         else:
-                            total_ot_mins += int(round(val_h * 60))
+                            total_ot_mins += val_mins
                 actual_ot_list.append(round(total_ot_mins / 60.0, 1))
             res_df["総残業時間(h)"] = actual_ot_list
             
