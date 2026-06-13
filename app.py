@@ -17,6 +17,9 @@ if 'config' not in st.session_state:
 
 st.title("🛡️ 究極 of 勤務作成エンジン V80 (Team Excellence Pass)")
 
+# 画面最上部に注意喚起を追加
+st.warning("⚠️ **重要**: 各タブ（基本構成、スキル・公休、申し込み）で数値を編集した後は、**必ずそのタブの下部にある「保存する・確定する」ボタンをクリック**してください。保存せずに別のタブに移動すると、編集内容が反映されません。")
+
 # --- 2. データのバックアップ・復元管理 ---
 with st.sidebar:
     st.header("📂 設定データの完全同期")
@@ -132,7 +135,6 @@ with tab_skl:
             )
             ot_df = get_persisted_df("overtime", default_overtime)
             
-            # 古いデータ（時間表記）を読み込んだ場合の自動変換・救済処理
             if "残業時間(時間)" in ot_df.columns and "残業時間(分)" not in ot_df.columns:
                 ot_df["残業時間(分)"] = (ot_df["残業時間(時間)"] * 60).fillna(60).astype(int)
                 ot_df = ot_df.drop(columns=["残業時間(時間)"])
@@ -187,7 +189,7 @@ with tab_roster:
     # --- 数理最適化開始 ---
     st.divider()
     st.subheader("🧬 勤務表作成エンジンの実行")
-    st.info("※入力テーブルの値を変更した場合は、必ず上部の「保存する」ボタンを押してから実行してください。")
+    st.info("⚠️ **注意**: 公休数などの設定を変更した場合は、必ず各タブの下部にある「保存する」ボタンを押して確定させてから、以下の勤務作成ボタンを押してください。")
     
     if st.button("🚀 AIによる勤務作成 (最高解モード)"):
         model = cp_model.CpModel()
@@ -333,6 +335,10 @@ with tab_roster:
             is_off = [model.NewBoolVar(f'is_off_{s}_{d}') for d in range(n_days)]
             for d in range(n_days):
                 model.Add(is_off[d] == x[s, d, S_OFF] + x[s, d, S_CHOU])
+            
+            # 調整休日(S_CHOU)の過剰・不要な使用を抑制するための微小なペナルティ（必要最小限のみ使用させるため）
+            # これにより、スタッフが過剰でも無暗に「調」が発生せず、公休目標値「休」を最優先で合わせにいきます
+            score_objs.append(sum(x[s, d, S_CHOU] for d in range(n_days)) * -100)
             
             # 月間残業時間の計算 (直接分単位で整数計算)
             ot_vars = []
