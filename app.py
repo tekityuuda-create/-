@@ -4,7 +4,7 @@ import calendar
 import json
 from ortools.sat.python import cp_model
 
-# --- 1. グローバル設定：最高峰のデザインとアイコン ---
+# --- 1. グローバル設定：デザインとレイアウト ---
 st.set_page_config(page_title="AI勤務作成：V80 Ultra Optimizer", page_icon="🛡️", layout="wide")
 
 if 'config' not in st.session_state:
@@ -16,6 +16,8 @@ if 'config' not in st.session_state:
     }
 
 st.title("勤務作成エンジン (Team Excellence Pass)")
+
+st.warning("⚠️ **重要**: 各タブ（基本構成、スキル・公休、申し込み）で数値を編集した後は、**必ずそのタブの下部にある「保存する・確定する」ボタンをクリック**してください。保存せずに別のタブに移動すると、編集内容が反映されません。")
 
 # --- 2. データのバックアップ・復元管理 ---
 with st.sidebar:
@@ -103,36 +105,60 @@ with tab_st:
 
 with tab_skl:
     with st.form("skill_form"):
-        st.subheader("🎓 専門スキル・月間公休数・教育ノルマ")
+        st.subheader("🎓 専門スキル設定")
         st.write("○:可能, △:見習い（ベテラン必須）, ×:不可")
-        
-        # 統合テーブル表示
         skl_df = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list), ["○","△","×"])
         ed_skill = st.data_editor(skl_df, use_container_width=True, key="skill_ed")
         
         col_c1, col_c2 = st.columns(2)
         with col_c1:
+            st.subheader("📅 月間公休数設定")
             hols_df = get_persisted_df("hols", pd.DataFrame(9, index=staff_list, columns=["公休数"]))
             ed_hols = st.data_editor(hols_df, use_container_width=True, key="hol_ed")
-        with col_c2:
+            
+            st.subheader("🏫 教育ノルマ設定")
             tr_cols = [f"{s}_見習い回数" for s in s_list]
             tr_df = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=tr_cols))
             ed_trainee = st.data_editor(tr_df, use_container_width=True, key="tr_ed")
+        with col_c2:
+            st.subheader("⏱️ 各担務の残業時間設定 (分)")
+            st.write("※1時間半なら 90 と入力してください")
+            ot_indices = list(s_list)
+            if "C" in s_list and "D" in s_list and "F" not in ot_indices:
+                ot_indices.append("F")
             
-        submitted_skl = st.form_submit_button("⚖️ スキル・公休の設定を保存する")
+            default_overtime = pd.DataFrame(
+                [90, 60, 120, 150, 60, 180][:len(ot_indices)], 
+                index=ot_indices, 
+                columns=["残業時間(分)"]
+            )
+            ot_df = get_persisted_df("overtime", default_overtime)
+            
+            # 過去の時間表記データを読み込んだ場合の自動変換・救済処理
+            if "残業時間(時間)" in ot_df.columns and "残業時間(分)" not in ot_df.columns:
+                ot_df["残業時間(分)"] = (ot_df["残業時間(時間)"] * 60).fillna(60).astype(int)
+                ot_df = ot_df.drop(columns=["残業時間(時間)"])
+            if "残業時間(分)" not in ot_df.columns:
+                ot_df["残業時間(分)"] = 60
+            ot_df = ot_df.reindex(columns=["残業時間(分)"])
+            
+            ed_overtime = st.data_editor(ot_df, use_container_width=True, key="ot_ed")
+            
+        submitted_skl = st.form_submit_button("⚖️ スキル・公休・残業の設定を保存する")
         if submitted_skl:
             if "saved_tables" not in st.session_state.config:
                 st.session_state.config["saved_tables"] = {}
             st.session_state.config["saved_tables"]["skill"] = ed_skill.to_dict()
             st.session_state.config["saved_tables"]["hols"] = ed_hols.to_dict()
             st.session_state.config["saved_tables"]["trainee"] = ed_trainee.to_dict()
-            st.success("スキル・公休設定を保存しました。")
+            st.session_state.config["saved_tables"]["overtime"] = ed_overtime.to_dict()
+            st.success("設定を保存しました。")
             st.rerun()
 
 with tab_roster:
     _, n_days = calendar.monthrange(year, month)
     days_cols = [f"{d+1}({['月','火','水','木','金','土','日'][calendar.weekday(year,month,d+1)]})" for d in range(n_days)]
-    options = ["", "休", "日"] + s_list
+    options = ["", "休", "日", "調"] + s_list
 
     with st.form("roster_input_form"):
         st.subheader("📝 前月末引継ぎ & 今月の申し込み")
@@ -163,7 +189,7 @@ with tab_roster:
     # --- 数理最適化開始 ---
     st.divider()
     st.subheader("🧬 勤務表作成エンジンの実行")
-    st.info("※入力テーブルの値を変更した場合は、必ず上部の「保存する」ボタンを押してから実行してください。")
+    st.info("⚠️ **注意**: 公休数や残業設定を変更した場合は、必ず各タブの下部にある「保存する」ボタンを押して確定させてから、以下の勤務作成ボタンを押してください。")
     
     if st.button("🚀 AIによる勤務作成 (最高解モード)"):
         model = cp_model.CpModel()
@@ -179,7 +205,15 @@ with tab_roster:
             f_idx = s_list_extended.index("F")
 
         num_types_extended = len(s_list_extended)
-        S_OFF, S_NIK = 0, num_types_extended + 1
+        
+        # シフトID定義:
+        # 0: 休 (S_OFF)
+        # 1〜num_types_extended: A, B, C, D, E, F など
+        # num_types_extended + 1: 日勤 (S_NIK)
+        # num_types_extended + 2: 調整休日 (S_CHOU)
+        S_OFF = 0
+        S_NIK = num_types_extended + 1
+        S_CHOU = num_types_extended + 2
         
         E_IDS = [s_list_extended.index(x) + 1 for x in early_gr if x in s_list_extended]
         L_IDS = [s_list_extended.index(x) + 1 for x in late_gr if x in s_list_extended]
@@ -194,6 +228,18 @@ with tab_roster:
         opt_prev = pd.DataFrame(saved.get("prev")).reindex(index=staff_list, columns=["前月4日前","前月3日前","前月2日前","前月末日"]).fillna("休")
         opt_req = pd.DataFrame(saved.get("request")).reindex(index=staff_list, columns=days_cols).fillna("")
         opt_ex = pd.DataFrame(saved.get("exclude")).reindex(index=[d+1 for d in range(n_days)], columns=s_list).fillna(False)
+        
+        ot_indices = list(s_list)
+        if has_C_and_D and "F" not in ot_indices:
+            ot_indices.append("F")
+            
+        # 残業設定のロードと互換性処理
+        raw_ot = pd.DataFrame(saved.get("overtime")).reindex(ot_indices)
+        if "残業時間(時間)" in raw_ot.columns and "残業時間(分)" not in raw_ot.columns:
+            raw_ot["残業時間(分)"] = (raw_ot["残業時間(時間)"] * 60).fillna(60).astype(int)
+        if "残業時間(分)" not in raw_ot.columns:
+            raw_ot["残業時間(分)"] = 60
+        opt_overtime = raw_ot.fillna(60)
 
         # Fシフト用スキル判定関数
         def get_skill_for_F(s_idx):
@@ -205,8 +251,8 @@ with tab_roster:
                 return "○"
             return "△"
 
-        # 変数: x[スタッフ, 日, シフト]
-        x = {(s, d, i): model.NewBoolVar(f'x_{s}_{d}_{i}') for s in range(total) for d in range(n_days) for i in range(num_types_extended + 2)}
+        # 変数: x[スタッフ, 日, シフト] (休〜調整休日の全レンジをカバー)
+        x = {(s, d, i): model.NewBoolVar(f'x_{s}_{d}_{i}') for s in range(total) for d in range(n_days) for i in range(num_types_extended + 3)}
         score_objs = []
 
         # 前月情報デコード
@@ -289,17 +335,57 @@ with tab_roster:
                         veteran_on_duty = sum(x[s, d, other_sid] for s in all_skilled_staff for other_sid in range(1, num_types_extended+1))
                         model.Add(veteran_on_duty >= 1).OnlyEnforceIf(x[s_t, d, sid])
 
-            # 1日1人1回 (Hard Constraint)
-            for s in range(total): model.Add(sum(x[s, d, i] for i in range(num_types_extended+2)) == 1)
+            # 1日1人1回 (S_CHOUを含めた全レンジからちょうど1つ選択)
+            for s in range(total): model.Add(sum(x[s, d, i] for i in range(num_types_extended+3)) == 1)
 
         # 個人別の高度な最適化
         for s in range(total):
             is_early = [model.NewBoolVar(f'ie_{s}_{d}') for d in range(n_days)]
             is_late = [model.NewBoolVar(f'il_{s}_{d}') for d in range(n_days)]
-            is_off = [x[s, d, S_OFF] for d in range(n_days)]
             
+            # 「公休(S_OFF)」または「調整休日(S_CHOU)」の両方を休日状態として連動
+            is_off = [model.NewBoolVar(f'is_off_{s}_{d}') for d in range(n_days)]
             for d in range(n_days):
-                # 判定用スイッチ変数の連動
+                model.Add(is_off[d] == x[s, d, S_OFF] + x[s, d, S_CHOU])
+            
+            # 調整休日(S_CHOU)の過剰・不要な使用を抑制するための微小なペナルティ
+            score_objs.append(sum(x[s, d, S_CHOU] for d in range(n_days)) * -100)
+            
+            # 月間残業時間の計算 (直接分単位で整数計算)
+            ot_vars = []
+            for d in range(n_days):
+                wd = calendar.weekday(year, month, d+1)
+                ot_mins_by_shift = [0] * (num_types_extended + 3)
+                
+                for i, s_name in enumerate(s_list_extended):
+                    sid = i + 1
+                    val_mins = int(opt_overtime.loc[s_name, "残業時間(分)"])
+                    
+                    if wd == 6:  # 日曜日は全担務残業なし
+                        ot_mins_by_shift[sid] = 0
+                    elif wd == 5:  # 土曜日のA, Bは残業なし
+                        if s_name in ["A", "B"]:
+                            ot_mins_by_shift[sid] = 0
+                        else:
+                            ot_mins_by_shift[sid] = val_mins
+                    else:  # 平日
+                        ot_mins_by_shift[sid] = val_mins
+                
+                # 休(S_OFF), 日勤(S_NIK), 調整休日(S_CHOU) は労働時間としては0分
+                ot_mins_by_shift[S_OFF] = 0
+                ot_mins_by_shift[S_NIK] = 0
+                ot_mins_by_shift[S_CHOU] = 0
+                
+                ot_day = model.NewIntVar(0, 1440, f'ot_{s}_{d}')
+                model.Add(ot_day == sum(x[s, d, sid] * ot_mins_by_shift[sid] for sid in range(num_types_extended + 3)))
+                ot_vars.append(ot_day)
+            
+            # 月間残業時間の上限制限
+            # 実働総残業時間 - （調整休日の付与数 × 445分）が 30時間(1800分) 以下
+            chou_count = sum(x[s, d, S_CHOU] for d in range(n_days))
+            model.Add(sum(ot_vars) - chou_count * 445 <= 1800)
+
+            for d in range(n_days):
                 model.Add(sum(x[s, d, i] for i in E_IDS) == 1).OnlyEnforceIf(is_early[d])
                 model.Add(sum(x[s, d, i] for i in E_IDS) == 0).OnlyEnforceIf(is_early[d].Not())
                 model.Add(sum(x[s, d, i] for i in L_IDS) == 1).OnlyEnforceIf(is_late[d])
@@ -314,7 +400,7 @@ with tab_roster:
                     if skill_val == "×": model.Add(x[s, d, i+1] == 0)
 
                 req = opt_req.iloc[s, d]
-                c_map = {"休": S_OFF, "日": S_NIK, "": -1}
+                c_map = {"休": S_OFF, "日": S_NIK, "調": S_CHOU, "": -1}
                 for i, n in enumerate(s_list_extended): c_map[n] = i+1
                 if req in c_map and req != "": model.Add(x[s, d, c_map[req]] == 1)
                 
@@ -354,9 +440,9 @@ with tab_roster:
                 for di in range(n_days):
                     if opt_req.iloc[s, di] != "日": model.Add(x[s, di, S_NIK] == 0)
 
-            # 公休数不一致を罰則化
+            # 公休数不一致を罰則化 (調整休日S_CHOUを含めず、契約上の公休数S_OFFのみを計算)
             target_h_count = int(opt_hols.iloc[s, 0])
-            act_h_count = sum(is_off)
+            act_h_count = sum(x[s, di, S_OFF] for di in range(n_days))
             h_diff_raw = model.NewIntVar(-n_days, n_days, f'hdr_{s}')
             model.Add(h_diff_raw == act_h_count - target_h_count)
             h_diff = model.NewIntVar(0, n_days, f'hd_{s}')
@@ -379,19 +465,48 @@ with tab_roster:
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
             st.success("✨ 勤務作成と調整が完了しました。")
             res_rows = []
-            id_char = {S_OFF: "休", S_NIK: "日"}
+            id_char = {S_OFF: "休", S_NIK: "日", S_CHOU: "調"}
             for i, n in enumerate(s_list_extended): id_char[i+1] = n
             for si in range(total):
-                res_rows.append([id_char[next(j for j in range(num_types_extended+2) if slv.Value(x[si, di, j])==1)] for di in range(n_days)])
+                res_rows.append([id_char[next(j for j in range(num_types_extended+3) if slv.Value(x[si, di, j])==1)] for di in range(n_days)])
             res_df = pd.DataFrame(res_rows, index=staff_list, columns=days_cols)
             res_df["公休数"] = [row.count("休") for row in res_rows]
+            res_df["調整休数"] = [row.count("調") for row in res_rows]
+            
+            # 各スタッフの最終的な月間残業時間の集計
+            actual_ot_list = []
+            for s in range(total):
+                total_ot_mins = 0
+                count_chou = 0
+                for d in range(n_days):
+                    assigned_char = res_rows[s][d]
+                    if assigned_char == "調":
+                        count_chou += 1
+                    elif assigned_char in s_list_extended:
+                        wd = calendar.weekday(year, month, d+1)
+                        val_mins = int(opt_overtime.loc[assigned_char, "残業時間(分)"])
+                        # 曜日例外ルール評価
+                        if wd == 6:
+                            total_ot_mins += 0
+                        elif wd == 5 and assigned_char in ["A", "B"]:
+                            total_ot_mins += 0
+                        else:
+                            total_ot_mins += val_mins
+                
+                # 調整休日による残業相殺控除を適用 (1回につき445分)
+                net_ot_mins = total_ot_mins - (count_chou * 445)
+                # 残業時間のマイナス値表示を防止するため下限を0.0hとする
+                net_ot_hours = max(0.0, round(net_ot_mins / 60.0, 1))
+                actual_ot_list.append(net_ot_hours)
+            res_df["総残業時間(h)"] = actual_ot_list
             
             # 色分け表示関数
             def cl(v):
                 if v == "休": return 'background-color: #ffcccc'
                 if v == "日": return 'background-color: #e0f0ff'
+                if v == "調": return 'background-color: #ffe0b2; font-weight: bold; color: #e65100;' # 調整休日はオレンジ系
                 if v in early_gr: return 'background-color: #ffffcc'
-                if v == "F": return 'background-color: #e8d7ff; font-weight: bold; color: #4a148c;' # Fは紫色の特別カラー
+                if v == "F": return 'background-color: #e8d7ff; font-weight: bold; color: #4a148c;'
                 return 'background-color: #ccffcc'
                 
             st.dataframe(res_df.style.map(cl), use_container_width=True)
