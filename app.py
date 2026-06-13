@@ -4,7 +4,7 @@ import calendar
 import json
 from ortools.sat.python import cp_model
 
-# --- 1. グローバル設定：最高峰のデザインとアイコン ---
+# --- 1. グローバル設定：デザインとレイアウト ---
 st.set_page_config(page_title="AI勤務作成：V80 Ultra Optimizer", page_icon="🛡️", layout="wide")
 
 if 'config' not in st.session_state:
@@ -17,7 +17,6 @@ if 'config' not in st.session_state:
 
 st.title("🛡️ 究極 of 勤務作成エンジン V80 (Team Excellence Pass)")
 
-# 画面最上部に注意喚起を追加
 st.warning("⚠️ **重要**: 各タブ（基本構成、スキル・公休、申し込み）で数値を編集した後は、**必ずそのタブの下部にある「保存する・確定する」ボタンをクリック**してください。保存せずに別のタブに移動すると、編集内容が反映されません。")
 
 # --- 2. データのバックアップ・復元管理 ---
@@ -228,7 +227,7 @@ with tab_roster:
         if has_C_and_D and "F" not in ot_indices:
             ot_indices.append("F")
         
-        # 残業設定のロードと互換性処理
+        # 残業設定のロード
         raw_ot = pd.DataFrame(saved.get("overtime")).reindex(ot_indices)
         if "残業時間(時間)" in raw_ot.columns and "残業時間(分)" not in raw_ot.columns:
             raw_ot["残業時間(分)"] = (raw_ot["残業時間(時間)"] * 60).fillna(60).astype(int)
@@ -336,8 +335,7 @@ with tab_roster:
             for d in range(n_days):
                 model.Add(is_off[d] == x[s, d, S_OFF] + x[s, d, S_CHOU])
             
-            # 調整休日(S_CHOU)の過剰・不要な使用を抑制するための微小なペナルティ（必要最小限のみ使用させるため）
-            # これにより、スタッフが過剰でも無暗に「調」が発生せず、公休目標値「休」を最優先で合わせにいきます
+            # 調整休日(S_CHOU)の過剰・不要な使用を抑制するための微小なペナルティ
             score_objs.append(sum(x[s, d, S_CHOU] for d in range(n_days)) * -100)
             
             # 月間残業時間の計算 (直接分単位で整数計算)
@@ -360,7 +358,7 @@ with tab_roster:
                     else:  # 平日
                         ot_mins_by_shift[sid] = val_mins
                 
-                # 休(S_OFF), 日勤(S_NIK), 調整休日(S_CHOU) は残業0分
+                # 休(S_OFF), 日勤(S_NIK), 調整休日(S_CHOU) は労働時間としては0分
                 ot_mins_by_shift[S_OFF] = 0
                 ot_mins_by_shift[S_NIK] = 0
                 ot_mins_by_shift[S_CHOU] = 0
@@ -369,8 +367,9 @@ with tab_roster:
                 model.Add(ot_day == sum(x[s, d, sid] * ot_mins_by_shift[sid] for sid in range(num_types_extended + 3)))
                 ot_vars.append(ot_day)
             
-            # 月間残業時間の上限制限 (30時間 = 1800分)
-            model.Add(sum(ot_vars) <= 1800)
+            # 月間残業時間の上限制限 (実働残業合計 - 調整休日1回あたり445分を差し引いたものが 30時間(1800分) 以下)
+            chou_count = sum(x[s, d, S_CHOU] for d in range(n_days))
+            model.Add(sum(ot_vars) - chou_count * 445 <= 1800)
 
             for d in range(n_days):
                 model.Add(sum(x[s, d, i] for i in E_IDS) == 1).OnlyEnforceIf(is_early[d])
@@ -464,9 +463,12 @@ with tab_roster:
             actual_ot_list = []
             for s in range(total):
                 total_ot_mins = 0
+                count_chou = 0
                 for d in range(n_days):
                     assigned_char = res_rows[s][d]
-                    if assigned_char in s_list_extended:
+                    if assigned_char == "調":
+                        count_chou += 1
+                    elif assigned_char in s_list_extended:
                         wd = calendar.weekday(year, month, d+1)
                         val_mins = int(opt_overtime.loc[assigned_char, "残業時間(分)"])
                         # 曜日例外ルール評価
@@ -476,7 +478,12 @@ with tab_roster:
                             total_ot_mins += 0
                         else:
                             total_ot_mins += val_mins
-                actual_ot_list.append(round(total_ot_mins / 60.0, 1))
+                
+                # 調整休日による残業相殺控除を適用 (1回につき445分)
+                net_ot_mins = total_ot_mins - (count_chou * 445)
+                # 残業時間のマイナス値表示を防止するため下限を0.0hとする
+                net_ot_hours = max(0.0, round(net_ot_mins / 60.0, 1))
+                actual_ot_list.append(net_ot_hours)
             res_df["総残業時間(h)"] = actual_ot_list
             
             # 色分け表示関数
