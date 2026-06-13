@@ -367,9 +367,12 @@ with tab_roster:
                 model.Add(ot_day == sum(x[s, d, sid] * ot_mins_by_shift[sid] for sid in range(num_types_extended + 3)))
                 ot_vars.append(ot_day)
             
-            # 月間残業時間の上限制限 (実働残業合計 - 調整休日1回あたり445分を差し引いたものが 30時間(1800分) 以下)
+            # 調整休日(S_CHOU)の累進的な付与ルール:
+            # 「実働残業時間(分)」が30時間(1800分)を超えるごとに、1回の調整休日「調」を義務付けます
+            # 数式: (調整休日数 * 1800) >= 実働残業時間 - 1800
+            # 例: 〜1800分(30h)なら0回、1801分〜3600分(60h)なら最低1回、3601分〜5400分(90h)なら最低2回必要
             chou_count = sum(x[s, d, S_CHOU] for d in range(n_days))
-            model.Add(sum(ot_vars) - chou_count * 445 <= 1800)
+            model.Add(chou_count * 1800 >= sum(ot_vars) - 1800)
 
             for d in range(n_days):
                 model.Add(sum(x[s, d, i] for i in E_IDS) == 1).OnlyEnforceIf(is_early[d])
