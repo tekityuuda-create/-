@@ -15,7 +15,7 @@ if 'config' not in st.session_state:
         "year": 2025, "month": 1, "saved_tables": {}
     }
 
-st.title("🛡️ 究極の勤務作成エンジン V80 (Team Excellence Pass)")
+st.title("🛡️ 究極 of 勤務作成エンジン V80 (Team Excellence Pass)")
 
 # --- 2. データのバックアップ・復元管理 ---
 with st.sidebar:
@@ -167,10 +167,22 @@ with tab_roster:
     
     if st.button("🚀 AIによる勤務作成 (最高解モード)"):
         model = cp_model.CpModel()
-        num_types = len(s_list)
-        S_OFF, S_NIK = 0, num_types + 1
-        E_IDS = [s_list.index(x) + 1 for x in early_gr]
-        L_IDS = [s_list.index(x) + 1 for x in late_gr]
+        
+        # 内部処理用のシフト拡張（土曜日救済用のFシフトを動的に追加）
+        s_list_extended = list(s_list)
+        has_C_and_D = "C" in s_list and "D" in s_list
+        c_idx, d_idx, f_idx = -1, -1, -1
+        if has_C_and_D:
+            s_list_extended.append("F")
+            c_idx = s_list.index("C")
+            d_idx = s_list.index("D")
+            f_idx = s_list_extended.index("F")
+
+        num_types_extended = len(s_list_extended)
+        S_OFF, S_NIK = 0, num_types_extended + 1
+        
+        E_IDS = [s_list_extended.index(x) + 1 for x in early_gr if x in s_list_extended]
+        L_IDS = [s_list_extended.index(x) + 1 for x in late_gr if x in s_list_extended]
         
         # 変数マッピング
         w_rhythm = w_mixing
@@ -183,8 +195,18 @@ with tab_roster:
         opt_req = pd.DataFrame(saved.get("request")).reindex(index=staff_list, columns=days_cols).fillna("")
         opt_ex = pd.DataFrame(saved.get("exclude")).reindex(index=[d+1 for d in range(n_days)], columns=s_list).fillna(False)
 
+        # Fシフト用スキル判定関数
+        def get_skill_for_F(s_idx):
+            skill_c = opt_skill.iloc[s_idx, c_idx]
+            skill_d = opt_skill.iloc[s_idx, d_idx]
+            if skill_c == "×" or skill_d == "×":
+                return "×"
+            elif skill_c == "○" and skill_d == "○":
+                return "○"
+            return "△"
+
         # 変数: x[スタッフ, 日, シフト]
-        x = {(s, d, i): model.NewBoolVar(f'x_{s}_{d}_{i}') for s in range(total) for d in range(n_days) for i in range(num_types + 2)}
+        x = {(s, d, i): model.NewBoolVar(f'x_{s}_{d}_{i}') for s in range(total) for d in range(n_days) for i in range(num_types_extended + 2)}
         score_objs = []
 
         # 前月情報デコード
@@ -198,29 +220,77 @@ with tab_roster:
         for d in range(n_days):
             wd = calendar.weekday(year, month, d+1)
             
-            # A. 担務充足 (ご要望に合わせ強制約化：1日各シフトにちょうど1人)
-            for i, s_name in enumerate(s_list):
+            # 土曜日の場合のC/D統合（F勤務適用）決定変数
+            use_F_var = None
+            if wd == 5 and has_C_and_D:
+                use_F_var = model.NewBoolVar(f'use_F_{d}')
+                # 統合勤務Fの使用には巨大なペナルティ（-1000万点）を科すことで「通常勤務では回らない最終手段」としてのみ発動させる
+                score_objs.append(use_F_var * -10000000)
+
+            # A. 担務充足
+            for i, s_name in enumerate(s_list_extended):
                 sid = i + 1
-                is_excl = opt_ex.iloc[d, i] or (wd == 6 and s_name == "C")
-                skilled = [s for s in range(total) if opt_skill.iloc[s, i] == "○"]
-                trainee = [s for s in range(total) if opt_skill.iloc[s, i] == "△"]
+                
+                # Fは土曜日のみ許可、それ以外の曜日は除外扱い
+                if s_name == "F":
+                    is_excl = not (wd == 5 and has_C_and_D)
+                else:
+                    is_excl = opt_ex.iloc[d, i] or (wd == 6 and s_name == "C")
+                
+                # Fスキル及び通常スキルの判定
+                if s_name == "F":
+                    skilled = [s for s in range(total) if get_skill_for_F(s) == "○"]
+                    trainee = [s for s in range(total) if get_skill_for_F(s) == "△"]
+                else:
+                    skilled = [s for s in range(total) if opt_skill.iloc[s, i] == "○"]
+                    trainee = [s for s in range(total) if opt_skill.iloc[s, i] == "△"]
+                
                 s_sum = sum(x[s, d, sid] for s in skilled)
                 t_sum = sum(x[s, d, sid] for s in trainee)
                 
-                if is_excl:
-                    model.Add(s_sum + t_sum == 0)
+                # 土曜日限定のF適用判定ロジック
+                if s_name in ["C", "D", "F"] and wd == 5 and has_C_and_D:
+                    if s_name == "F":
+                        # 統合F使用(use_F_var=1)ならFは1人、使用しないならFは0人
+                        model.Add(s_sum + t_sum == 1).OnlyEnforceIf(use_F_var)
+                        model.Add(s_sum + t_sum == 0).OnlyEnforceIf(use_F_var.Not())
+                    else:  # C または D
+                        # 統合F使用(use_F_var=1)ならCとDはどちらも0人
+                        model.Add(s_sum + t_sum == 0).OnlyEnforceIf(use_F_var)
+                        # 統合F不使用(use_F_var=0)ならCとDは1人ずつ（除外日を除く）
+                        if is_excl:
+                            model.Add(s_sum + t_sum == 0).OnlyEnforceIf(use_F_var.Not())
+                        else:
+                            model.Add(s_sum + t_sum == 1).OnlyEnforceIf(use_F_var.Not())
                 else:
-                    # 対象シフトに入るスタッフは「ちょうど1人」に制限
-                    model.Add(s_sum + t_sum == 1)
-
-                    # 見習い（△）がこのシフトに入る場合、同日の他シフトにベテラン（いずれかのシフトで「○」を持つ人）が1人以上出勤していることを保証する
+                    # 通常曜日、または土曜日のA/B/E勤務
+                    if is_excl:
+                        model.Add(s_sum + t_sum == 0)
+                    else:
+                        model.Add(s_sum + t_sum == 1)
+                    
+                    # 通常日の見習い同日ベテラン出勤保証
                     for s_t in trainee:
                         all_skilled_staff = [s for s in range(total) if "○" in opt_skill.iloc[s].values]
-                        veteran_on_duty = sum(x[s, d, other_sid] for s in all_skilled_staff for other_sid in range(1, num_types+1))
+                        veteran_on_duty = sum(x[s, d, other_sid] for s in all_skilled_staff for other_sid in range(1, num_types_extended+1))
+                        model.Add(veteran_on_duty >= 1).OnlyEnforceIf(x[s_t, d, sid])
+
+            # 土曜日の見習い同日ベテラン出勤保証（C/D/Fが個別ループから外れるためここで別途評価）
+            if wd == 5 and has_C_and_D:
+                for s_name in ["C", "D", "F"]:
+                    sid = s_list_extended.index(s_name) + 1
+                    if s_name == "F":
+                        trainee = [s for s in range(total) if get_skill_for_F(s) == "△"]
+                    else:
+                        trainee = [s for s in range(total) if opt_skill.iloc[s, s_list_extended.index(s_name)] == "△"]
+                    
+                    for s_t in trainee:
+                        all_skilled_staff = [s for s in range(total) if "○" in opt_skill.iloc[s].values]
+                        veteran_on_duty = sum(x[s, d, other_sid] for s in all_skilled_staff for other_sid in range(1, num_types_extended+1))
                         model.Add(veteran_on_duty >= 1).OnlyEnforceIf(x[s_t, d, sid])
 
             # 1日1人1回 (Hard Constraint)
-            for s in range(total): model.Add(sum(x[s, d, i] for i in range(num_types+2)) == 1)
+            for s in range(total): model.Add(sum(x[s, d, i] for i in range(num_types_extended+2)) == 1)
 
         # 個人別の高度な最適化
         for s in range(total):
@@ -236,11 +306,16 @@ with tab_roster:
                 model.Add(sum(x[s, d, i] for i in L_IDS) == 0).OnlyEnforceIf(is_late[d].Not())
 
                 # 各種の制限（スキル×、申し込み、遅→早）
-                for i, _ in enumerate(s_list):
-                    if opt_skill.iloc[s, i] == "×": model.Add(x[s, d, i+1] == 0)
+                for i, s_name in enumerate(s_list_extended):
+                    if s_name == "F":
+                        skill_val = get_skill_for_F(s)
+                    else:
+                        skill_val = opt_skill.iloc[s, i]
+                    if skill_val == "×": model.Add(x[s, d, i+1] == 0)
+
                 req = opt_req.iloc[s, d]
                 c_map = {"休": S_OFF, "日": S_NIK, "": -1}
-                for i, n in enumerate(s_list): c_map[n] = i+1
+                for i, n in enumerate(s_list_extended): c_map[n] = i+1
                 if req in c_map and req != "": model.Add(x[s, d, c_map[req]] == 1)
                 
                 if d < n_days - 1:
@@ -260,7 +335,7 @@ with tab_roster:
                 mix = model.NewBoolVar(f'mix_{s}_{di}')
                 model.AddBoolAnd([is_early[di], is_late[di+1]]).OnlyEnforceIf(mix)
                 score_objs.append(mix * 500 * w_rhythm)
-                # 連属性抑制（3連早番時に e_block を 1 に強制する関係を線形制約で表現）
+                # 連属性抑制
                 if di < n_days - 2:
                     e_block = model.NewBoolVar(f'eb_{s}_{di}')
                     model.Add(is_early[di] + is_early[di+1] + is_early[di+2] - 2 <= e_block)
@@ -289,7 +364,7 @@ with tab_roster:
             score_objs.append(h_diff * -50000 * w_holiday)
 
         # C. 担務平準化（公平性）
-        for i_sh in range(1, num_types + 1):
+        for i_sh in range(1, num_types_extended + 1):
             counts = [model.NewIntVar(0, n_days, f'sh_c{si}_{i_sh}') for si in range(total)]
             for si in range(total): model.Add(counts[si] == sum(x[si, d, i_sh] for d in range(n_days)))
             mx, mn = model.NewIntVar(0, n_days, f'mx_{i_sh}'), model.NewIntVar(0, n_days, f'mn_{i_sh}')
@@ -305,16 +380,20 @@ with tab_roster:
             st.success("✨ 勤務作成と調整が完了しました。")
             res_rows = []
             id_char = {S_OFF: "休", S_NIK: "日"}
-            for i, n in enumerate(s_list): id_char[i+1] = n
+            for i, n in enumerate(s_list_extended): id_char[i+1] = n
             for si in range(total):
-                res_rows.append([id_char[next(j for j in range(num_types+2) if slv.Value(x[si, di, j])==1)] for di in range(n_days)])
+                res_rows.append([id_char[next(j for j in range(num_types_extended+2) if slv.Value(x[si, di, j])==1)] for di in range(n_days)])
             res_df = pd.DataFrame(res_rows, index=staff_list, columns=days_cols)
             res_df["公休数"] = [row.count("休") for row in res_rows]
+            
+            # 色分け表示関数
             def cl(v):
                 if v == "休": return 'background-color: #ffcccc'
                 if v == "日": return 'background-color: #e0f0ff'
                 if v in early_gr: return 'background-color: #ffffcc'
+                if v == "F": return 'background-color: #e8d7ff; font-weight: bold; color: #4a148c;' # Fは紫色の特別カラー
                 return 'background-color: #ccffcc'
+                
             st.dataframe(res_df.style.map(cl), use_container_width=True)
             st.download_button("📥 ダウンロード", res_df.to_csv().encode('utf-8-sig'), "roster.csv")
         else: 
