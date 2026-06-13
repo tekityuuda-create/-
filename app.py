@@ -15,7 +15,7 @@ if 'config' not in st.session_state:
         "year": 2025, "month": 1, "saved_tables": {}
     }
 
-st.title("🛡️ 究極 of 勤務作成エンジン V80 (Team Excellence Pass)")
+st.title("勤務作成エンジン (Team Excellence Pass)")
 
 # --- 2. データのバックアップ・復元管理 ---
 with st.sidebar:
