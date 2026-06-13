@@ -4,7 +4,7 @@ import calendar
 import json
 from ortools.sat.python import cp_model
 
-# --- 1. グローバル設定：最高峰のデザインとアイコン ---
+# --- 1. グローバル設定：デザインとアイコン ---
 st.set_page_config(page_title="AI勤務作成：V80 Ultra Optimizer", page_icon="🛡️", layout="wide")
 
 if 'config' not in st.session_state:
@@ -36,7 +36,7 @@ with st.sidebar:
     w_h_rule = st.slider("ルールの厳守度", 0, 100, 95)
     w_mixing = st.slider("早遅ミキシング（バランス）", 0, 100, 70)
     w_fair = st.slider("担当回数の公平性", 0, 100, 50)
-    w_holiday = st.slider("公休数の厳守度", 0, 100, 80)
+    # 「公休数の厳守度」は強制制約となったためスライダーから削除しました
 
     st.divider()
     year = int(st.number_input("年", 2024, 2030, st.session_state.config["year"]))
@@ -336,8 +336,7 @@ with tab_roster:
             for d in range(n_days):
                 model.Add(is_off[d] == x[s, d, S_OFF] + x[s, d, S_CHOU])
             
-            # 調整休日(S_CHOU)の過剰・不要な使用を抑制するための微小なペナルティ（必要最小限のみ使用させるため）
-            # これにより、スタッフが過剰でも無暗に「調」が発生せず、公休目標値「休」を最優先で合わせにいきます
+            # 調整休日(S_CHOU)の過剰・不要な使用を抑制するための微小なペナルティ
             score_objs.append(sum(x[s, d, S_CHOU] for d in range(n_days)) * -100)
             
             # 月間残業時間の計算 (直接分単位で整数計算)
@@ -427,22 +426,9 @@ with tab_roster:
                 for di in range(n_days):
                     if opt_req.iloc[s, di] != "日": model.Add(x[s, di, S_NIK] == 0)
 
-            # 公休数不一致を罰則化 (調整休日S_CHOUを含めず、契約上の公休数S_OFFのみを計算)
+            # 【修正】公休数目標を「絶対死守」（強制・ハード制約化）
             target_h_count = int(opt_hols.iloc[s, 0])
-            act_h_count = sum(x[s, di, S_OFF] for di in range(n_days))
-            h_diff_raw = model.NewIntVar(-n_days, n_days, f'hdr_{s}')
-            model.Add(h_diff_raw == act_h_count - target_h_count)
-            h_diff = model.NewIntVar(0, n_days, f'hd_{s}')
-            model.AddAbsEquality(h_diff, h_diff_raw)
-            score_objs.append(h_diff * -50000 * w_holiday)
-
-        # C. 担務平準化（公平性）
-        for i_sh in range(1, num_types_extended + 1):
-            counts = [model.NewIntVar(0, n_days, f'sh_c{si}_{i_sh}') for si in range(total)]
-            for si in range(total): model.Add(counts[si] == sum(x[si, d, i_sh] for d in range(n_days)))
-            mx, mn = model.NewIntVar(0, n_days, f'mx_{i_sh}'), model.NewIntVar(0, n_days, f'mn_{i_sh}')
-            model.AddMaxEquality(mx, counts); model.AddMinEquality(mn, counts)
-            score_objs.append((mx - mn) * -100 * w_fair)
+            model.Add(sum(x[s, di, S_OFF] for di in range(n_days)) == target_h_count)
 
         model.Maximize(sum(score_objs))
         slv = cp_model.CpSolver()
@@ -458,37 +444,4 @@ with tab_roster:
                 res_rows.append([id_char[next(j for j in range(num_types_extended+3) if slv.Value(x[si, di, j])==1)] for di in range(n_days)])
             res_df = pd.DataFrame(res_rows, index=staff_list, columns=days_cols)
             res_df["公休数"] = [row.count("休") for row in res_rows]
-            res_df["調整休数"] = [row.count("調") for row in res_rows]
-            
-            # 各スタッフの最終的な月間残業時間の集計
-            actual_ot_list = []
-            for s in range(total):
-                total_ot_mins = 0
-                for d in range(n_days):
-                    assigned_char = res_rows[s][d]
-                    if assigned_char in s_list_extended:
-                        wd = calendar.weekday(year, month, d+1)
-                        val_mins = int(opt_overtime.loc[assigned_char, "残業時間(分)"])
-                        # 曜日例外ルール評価
-                        if wd == 6:
-                            total_ot_mins += 0
-                        elif wd == 5 and assigned_char in ["A", "B"]:
-                            total_ot_mins += 0
-                        else:
-                            total_ot_mins += val_mins
-                actual_ot_list.append(round(total_ot_mins / 60.0, 1))
-            res_df["総残業時間(h)"] = actual_ot_list
-            
-            # 色分け表示関数
-            def cl(v):
-                if v == "休": return 'background-color: #ffcccc'
-                if v == "日": return 'background-color: #e0f0ff'
-                if v == "調": return 'background-color: #ffe0b2; font-weight: bold; color: #e65100;' # 調整休日はオレンジ系
-                if v in early_gr: return 'background-color: #ffffcc'
-                if v == "F": return 'background-color: #e8d7ff; font-weight: bold; color: #4a148c;'
-                return 'background-color: #ccffcc'
-                
-            st.dataframe(res_df.style.map(cl), use_container_width=True)
-            st.download_button("📥 ダウンロード", res_df.to_csv().encode('utf-8-sig'), "roster.csv")
-        else: 
-            st.error("解が見つかりませんでした。入力制約が競合していないか確認してください。（例：管理者が平日に希望休を出している、または合計人数がシフト数に足りないなど）")
+            res_df["調整休数"] =
