@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import calendar
 import json
+import re
 from ortools.sat.python import cp_model
 
 # --- 1. グローバル設定：デザインとレイアウト ---
@@ -56,27 +57,42 @@ s_list = [s.strip() for s in raw_s.split(",") if s.strip()]
 early_gr = [x for x in s_list if x in st.session_state.config["early_shifts"]]
 late_gr = [x for x in s_list if x in st.session_state.config["late_shifts"]]
 
-# --- データの整合性を保ちながら読み込むヘルパー関数 ---
+# --- データの整合性を完全に保つための高精度復元関数（曜日・型ズレの吸収） ---
 def get_persisted_df(key, d_df, categories=None):
     tables = st.session_state.config.get("saved_tables", {})
     if key in tables:
         raw_data = tables.get(key)
         df = pd.DataFrame(raw_data)
-        # JSON保存や復元によって、インデックスやカラムの型（int/strなど）がズレるのを強制補正
-        if not df.empty:
-            try:
-                df.index = df.index.astype(d_df.index.dtype)
-            except:
-                pass
-            try:
-                df.columns = df.columns.astype(d_df.columns.dtype)
-            except:
-                pass
+        
+        # 1. 保存データとターゲットデータのインデックス/カラムを文字列型に統一
+        df.index = df.index.astype(str)
+        df.columns = df.columns.astype(str)
+        
+        # 2. 曜日変更（例: "1(水)" から "1(土)" への変動）に左右されないよう日付数字のみを抽出
+        def clean_col_name(c):
+            m = re.match(r'^(\d+)', str(c))
+            return m.group(1) if m else str(c)
+        
+        df.columns = [clean_col_name(c) for c in df.columns]
+        
+        # 3. 目的とする d_df の構造で新しい DataFrame を構築
+        result_df = pd.DataFrame(index=d_df.index, columns=d_df.columns)
+        
+        # 4. スタッフ名と日付数字を一致させて値を安全に移植する（型ズレ・並び順変動・曜日変更をすべて吸収）
+        for r_target in d_df.index:
+            r_str = str(r_target)
+            if r_str in df.index:
+                for c_target in d_df.columns:
+                    c_clean = clean_col_name(c_target)
+                    if c_clean in df.columns:
+                        result_df.at[r_target, c_target] = df.at[r_str, c_clean]
+        
+        # 5. 未入力やミスマッチの部分をデフォルト値で補完
+        result_df = result_df.fillna(d_df)
+        df = result_df
     else:
         df = d_df
     
-    # 不足している行や列をデフォルト値で安全に補完しながら再構築
-    df = df.reindex(index=d_df.index, columns=d_df.columns).fillna(d_df)
     if categories:
         for c in df.columns: 
             df[c] = pd.Categorical(df[c], categories=categories)
@@ -209,7 +225,7 @@ with tab_roster:
         # 変数マッピング
         w_rhythm = w_mixing
 
-        # 確定済みデータをセッションから安全に再現
+        # 確定済みデータをセッションから安全かつ精密に復元
         opt_skill = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list))
         opt_hols = get_persisted_df("hols", pd.DataFrame(9, index=staff_list, columns=["公休数"]))
         opt_prev = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=["前月4日前","前月3日前","前月2日前","前月末日"]))
@@ -279,7 +295,7 @@ with tab_roster:
                     under_sat_var = model.NewIntVar(0, 1, f'under_sat_{d}_{sid}')
                     
                     if s_name == "F":
-                        # 統合F使用(use_F_var=1)ならFは1人(不足時は0人)、使用しないならFは0人
+                        # シフト人数は【等式 (== 1)】で固定。超過は不許可
                         model.Add(s_sum + t_sum + under_sat_var == 1).OnlyEnforceIf(use_F_var)
                         model.Add(s_sum + t_sum == 0).OnlyEnforceIf(use_F_var.Not())
                     else:  # C または D
@@ -297,13 +313,13 @@ with tab_roster:
                     if is_excl:
                         model.Add(s_sum + t_sum == 0)
                     else:
-                        # 不足（0人配置）を許容する変数
+                        # シフト人数は【等式 (== 1)】で固定。2名配置の超過を絶対に許さない
                         under_std_var = model.NewIntVar(0, 1, f'under_std_{d}_{sid}')
                         model.Add(s_sum + t_sum + under_std_var == 1)
                         # 人手不足に対して莫大なペナルティ
                         score_objs.append(under_std_var * -100000000)
                     
-                    # 通常日の見習い同日ベテラン出勤保証（ベテランが全員希望休でもクラッシュしないよう、ペナルティ緩和化）
+                    # 通常日の見習い同日ベテラン出勤保証
                     for s_t in trainee:
                         all_skilled_staff = [s for s in range(total) if "○" in opt_skill.iloc[s].values]
                         veteran_on_duty = sum(x[s, d, other_sid] for s in all_skilled_staff for other_sid in range(1, num_types_extended+1))
@@ -390,16 +406,24 @@ with tab_roster:
                         model.Add(is_off[di] == 1).OnlyEnforceIf(m_o)
                         score_objs.append(m_o * 10000)
                     else: 
-                        # 平日は出勤を強く推奨するが、希望休や目標公休数を優先するためにソフト制約化
+                        # 平日は出勤を強く推奨
+                        # （管理者は制限なく日勤 (S_NIK) に逃げることができるため、一般職が余った日は自動的に管理者が日勤を担当します）
                         m_w = model.NewBoolVar(f'mw_{s}_{di}')
                         model.Add(is_off[di] == 0).OnlyEnforceIf(m_w)
                         score_objs.append(m_w * 500000)
             else:
                 for di in range(n_days):
-                    if opt_req.iloc[s, di] != "日": model.Add(x[s, di, S_NIK] == 0)
+                    if opt_req.iloc[s, di] != "日": 
+                        # 一般職の日勤は原則禁止。
+                        # 全員の公休目標を絶対厳守した際、数学的にどうしてもシフト枠が不足して全員があぶれる極限状態のみ、
+                        # 日勤へ逃げることを許容（ソフト制約化）。
+                        # 管理者の日勤（ペナルティなし）より非常に重いペナルティ（-1000万点）を課すことで、
+                        # 「まずは管理者が優先的に日勤に回り、それでも溢れる最悪の場合のみ一般職を日勤にする」ことを保証します。
+                        nik_var = x[s, di, S_NIK]
+                        score_objs.append(nik_var * -10000000)
 
             # 目標公休数の厳守（ハード制約）
-            # バグ修正：休み希望("休")の合計数が目標公休数を上回っている場合は、目標公休数を希望数に合わせて自動補正する
+            # 休み希望("休")の合計数が目標公休数を上回っている場合は、目標公休数を希望数に合わせて自動補正する
             req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s, di] == "休")
             target_h_count = max(int(opt_hols.iloc[s, 0]), req_off_count)
             
@@ -420,7 +444,7 @@ with tab_roster:
         status = slv.Solve(model)
 
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("✨ 勤務作成と調整が完了しました。申し込み（希望）は最優先で100%遵守されています。")
+            st.success("✨ 勤務作成と調整が完了しました。申し込み（希望）および公休数は最優先で100%厳格に履行されています。")
             res_rows = []
             id_char = {S_OFF: "休", S_NIK: "日"}
             for i, n in enumerate(s_list_extended): id_char[i+1] = n
