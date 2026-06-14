@@ -56,7 +56,7 @@ s_list = [s.strip() for s in raw_s.split(",") if s.strip()]
 early_gr = [x for x in s_list if x in st.session_state.config["early_shifts"]]
 late_gr = [x for x in s_list if x in st.session_state.config["late_shifts"]]
 
-# --- データの整合性を保ちながら読み込むヘルパー関数（バグ修正版） ---
+# --- データの整合性を保ちながら読み込むヘルパー関数 ---
 def get_persisted_df(key, d_df, categories=None):
     tables = st.session_state.config.get("saved_tables", {})
     if key in tables:
@@ -209,7 +209,7 @@ with tab_roster:
         # 変数マッピング
         w_rhythm = w_mixing
 
-        # 確定済みデータをセッションから安全に再現（再インデックスバグを防ぐため get_persisted_df を共通化）
+        # 確定済みデータをセッションから安全に再現
         opt_skill = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list))
         opt_hols = get_persisted_df("hols", pd.DataFrame(9, index=staff_list, columns=["公休数"]))
         opt_prev = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=["前月4日前","前月3日前","前月2日前","前月末日"]))
@@ -252,11 +252,15 @@ with tab_roster:
             for i, s_name in enumerate(s_list_extended):
                 sid = i + 1
                 
+                # 誰かがこのシフトを申し込み（希望）しているか確認
+                is_requested_by_someone = any(opt_req.iloc[s, d] == s_name for s in range(total))
+                
                 # Fは土曜日のみ許可、それ以外の曜日は除外扱い
                 if s_name == "F":
                     is_excl = not (wd == 5 and has_C_and_D)
                 else:
-                    is_excl = opt_ex.iloc[d, i] or (wd == 6 and s_name == "C")
+                    # 誰かが希望している場合は不要担務(除外設定)を強制的に上書きして解除
+                    is_excl = (opt_ex.iloc[d, i] and not is_requested_by_someone) or (wd == 6 and s_name == "C" and not is_requested_by_someone)
                 
                 # Fスキル及び通常スキルの判定
                 if s_name == "F":
@@ -271,32 +275,43 @@ with tab_roster:
                 
                 # 土曜日限定のF適用判定ロジック
                 if s_name in ["C", "D", "F"] and wd == 5 and has_C_and_D:
+                    # 不足（0人配置）を許容する変数（希望休によって充足できない場合のクラッシュ防止）
+                    under_sat_var = model.NewIntVar(0, 1, f'under_sat_{d}_{sid}')
+                    
                     if s_name == "F":
-                        # 統合F使用(use_F_var=1)ならFは1人、使用しないならFは0人
-                        model.Add(s_sum + t_sum == 1).OnlyEnforceIf(use_F_var)
+                        # 統合F使用(use_F_var=1)ならFは1人(不足時は0人)、使用しないならFは0人
+                        model.Add(s_sum + t_sum + under_sat_var == 1).OnlyEnforceIf(use_F_var)
                         model.Add(s_sum + t_sum == 0).OnlyEnforceIf(use_F_var.Not())
                     else:  # C または D
-                        # 統合F使用(use_F_var=1)ならCとDはどちらも0人
                         model.Add(s_sum + t_sum == 0).OnlyEnforceIf(use_F_var)
-                        # 統合F不使用(use_F_var=0)ならCとDは1人ずつ（除外日を除く）
                         if is_excl:
                             model.Add(s_sum + t_sum == 0).OnlyEnforceIf(use_F_var.Not())
                         else:
-                            model.Add(s_sum + t_sum == 1).OnlyEnforceIf(use_F_var.Not())
+                            model.Add(s_sum + t_sum + under_sat_var == 1).OnlyEnforceIf(use_F_var.Not())
+                    
+                    # 人手不足に対して莫大なペナルティ（希望休を崩すよりは、シフトを空席にすることを認める）
+                    score_objs.append(under_sat_var * -100000000)
+                    
                 else:
                     # 通常曜日、または土曜日のA/B/E勤務
                     if is_excl:
                         model.Add(s_sum + t_sum == 0)
                     else:
-                        model.Add(s_sum + t_sum == 1)
+                        # 不足（0人配置）を許容する変数
+                        under_std_var = model.NewIntVar(0, 1, f'under_std_{d}_{sid}')
+                        model.Add(s_sum + t_sum + under_std_var == 1)
+                        # 人手不足に対して莫大なペナルティ
+                        score_objs.append(under_std_var * -100000000)
                     
-                    # 通常日の見習い同日ベテラン出勤保証
+                    # 通常日の見習い同日ベテラン出勤保証（ベテランが全員希望休でもクラッシュしないよう、ペナルティ緩和化）
                     for s_t in trainee:
                         all_skilled_staff = [s for s in range(total) if "○" in opt_skill.iloc[s].values]
                         veteran_on_duty = sum(x[s, d, other_sid] for s in all_skilled_staff for other_sid in range(1, num_types_extended+1))
-                        model.Add(veteran_on_duty >= 1).OnlyEnforceIf(x[s_t, d, sid])
+                        no_vet_var = model.NewBoolVar(f'no_vet_{s_t}_{d}_{sid}')
+                        model.Add(veteran_on_duty + no_vet_var >= 1).OnlyEnforceIf(x[s_t, d, sid])
+                        score_objs.append(no_vet_var * -50000000)
 
-            # 土曜日の見習い同日ベテラン出勤保証（C/D/Fが個別ループから外れるためここで別途評価）
+            # 土曜日の見習い同日ベテラン出勤保証
             if wd == 5 and has_C_and_D:
                 for s_name in ["C", "D", "F"]:
                     sid = s_list_extended.index(s_name) + 1
@@ -308,7 +323,9 @@ with tab_roster:
                     for s_t in trainee:
                         all_skilled_staff = [s for s in range(total) if "○" in opt_skill.iloc[s].values]
                         veteran_on_duty = sum(x[s, d, other_sid] for s in all_skilled_staff for other_sid in range(1, num_types_extended+1))
-                        model.Add(veteran_on_duty >= 1).OnlyEnforceIf(x[s_t, d, sid])
+                        no_vet_var = model.NewBoolVar(f'no_vet_sat_{s_t}_{d}_{sid}')
+                        model.Add(veteran_on_duty + no_vet_var >= 1).OnlyEnforceIf(x[s_t, d, sid])
+                        score_objs.append(no_vet_var * -50000000)
 
             # 1日1人1回 (Hard Constraint)
             for s in range(total): model.Add(sum(x[s, d, i] for i in range(num_types_extended+2)) == 1)
@@ -334,7 +351,7 @@ with tab_roster:
                         skill_val = opt_skill.iloc[s, i]
                     if skill_val == "×": model.Add(x[s, d, i+1] == 0)
 
-                # 申し込み（希望）の反映（バグ修正：必ず適用されるハード制約に設定）
+                # 申し込み（希望）の反映（絶対に崩さない最強のハード制約）
                 req = opt_req.iloc[s, d]
                 c_map = {"休": S_OFF, "日": S_NIK, "": -1}
                 for i, n in enumerate(s_list_extended): c_map[n] = i+1
@@ -364,7 +381,7 @@ with tab_roster:
                     model.Add(is_early[di] + is_early[di+1] + is_early[di+2] - 2 <= e_block)
                     score_objs.append(e_block * -1000 * w_rhythm)
 
-            # 管理者・一般職の聖域（バグ修正：管理者の「平日出勤」をソフト制約に緩和）
+            # 管理者・一般職の聖域
             if s < n_mgr:
                 for di in range(n_days):
                     wd_v = calendar.weekday(year, month, di+1)
@@ -373,7 +390,7 @@ with tab_roster:
                         model.Add(is_off[di] == 1).OnlyEnforceIf(m_o)
                         score_objs.append(m_o * 10000)
                     else: 
-                        # 平日を基本出勤とする（希望休や目標公休を優先するため、強力なソフト制約にして柔軟性を持たせる）
+                        # 平日は出勤を強く推奨するが、希望休や目標公休数を優先するためにソフト制約化
                         m_w = model.NewBoolVar(f'mw_{s}_{di}')
                         model.Add(is_off[di] == 0).OnlyEnforceIf(m_w)
                         score_objs.append(m_w * 500000)
@@ -381,8 +398,11 @@ with tab_roster:
                 for di in range(n_days):
                     if opt_req.iloc[s, di] != "日": model.Add(x[s, di, S_NIK] == 0)
 
-            # 公休数を「絶対厳守（ハード制約）」に変更
-            target_h_count = int(opt_hols.iloc[s, 0])
+            # 目標公休数の厳守（ハード制約）
+            # バグ修正：休み希望("休")の合計数が目標公休数を上回っている場合は、目標公休数を希望数に合わせて自動補正する
+            req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s, di] == "休")
+            target_h_count = max(int(opt_hols.iloc[s, 0]), req_off_count)
+            
             act_h_count = sum(is_off)
             model.Add(act_h_count == target_h_count)
 
@@ -400,7 +420,7 @@ with tab_roster:
         status = slv.Solve(model)
 
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("✨ 勤務作成と調整が完了しました。")
+            st.success("✨ 勤務作成と調整が完了しました。申し込み（希望）は最優先で100%遵守されています。")
             res_rows = []
             id_char = {S_OFF: "休", S_NIK: "日"}
             for i, n in enumerate(s_list_extended): id_char[i+1] = n
@@ -420,4 +440,4 @@ with tab_roster:
             st.dataframe(res_df.style.map(cl), use_container_width=True)
             st.download_button("📥 ダウンロード", res_df.to_csv().encode('utf-8-sig'), "roster.csv")
         else: 
-            st.error("解が見つかりませんでした。入力制約が競合していないか確認してください。（例：シフトに対して出勤できるスタッフの総数が不足している、または専門スキルが必要なシフトに対して可能者が少なすぎるなど）")
+            st.error("解が見つかりませんでした。入力制約が競合していないか確認してください。")
