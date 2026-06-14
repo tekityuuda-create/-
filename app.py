@@ -17,8 +17,7 @@ if 'config' not in st.session_state:
     }
 
 st.title("勤務作成エンジン (Team Excellence Pass)")
-
-st.warning("⚠️ **重要**: 各タブ（基本構成、スキル・公休、申し込み）で数値を編集した後は、**必ずそのタブの下部にある「保存する・確定する」ボタンをクリック**してください。保存せずに別のタブに移動すると、編集内容が反映されません。")
+st.info("💡 **リアルタイム自動保存機能搭載**: 画面の入力や変更はすべてリアルタイムで保存されます。「保存ボタン」を押す必要はありません。")
 
 # --- 2. データのバックアップ・復元管理 ---
 with st.sidebar:
@@ -101,107 +100,117 @@ def get_persisted_df(key, d_df, categories=None):
 # --- 3. UIの統合タブ構成 ---
 tab_st, tab_skl, tab_roster = st.tabs(["🏗️ 1. 組織と勤務の構成", "⚖️ 2. 公休・スキル・回数", "🧬 3. 勤務表の最適化"])
 
+# --- タブ1. 組織と勤務の構成（オートセーブ） ---
 with tab_st:
-    with st.form("structure_form"):
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("👥 人員配置")
-            form_n_mgr = st.number_input("管理者数", 0, 5, n_mgr)
-            form_n_reg = st.number_input("一般職数", 1, 20, n_reg)
-            form_total = int(form_n_mgr + form_n_reg)
-            
-            form_names = list(staff_list)
-            if len(form_names) < form_total:
-                form_names.extend([f"スタッフ{i+1}" for i in range(len(form_names), form_total)])
-            form_names = form_names[:form_total]
-            
-            names_ed = st.data_editor(pd.DataFrame({"スタッフ名": form_names}), use_container_width=True, key="names_ed")
-        with c2:
-            st.subheader("📋 シフト構成")
-            form_raw_s = st.text_input("勤務略称 (,) 区切り", raw_s)
-            form_s_list = [s.strip() for s in form_raw_s.split(",") if s.strip()]
-            form_early_gr = st.multiselect("早番グループ", form_s_list, default=[x for x in form_s_list if x in early_gr])
-            form_late_gr = st.multiselect("遅番グループ", form_s_list, default=[x for x in form_s_list if x in late_gr])
-            
-        submitted_st = st.form_submit_button("🏗️ 構成を確定して保存する")
-        if submitted_st:
-            new_staff_list = names_ed["スタッフ名"].tolist()
-            st.session_state.config.update({
-                "num_mgr": form_n_mgr,
-                "num_regular": form_n_reg,
-                "staff_names": new_staff_list,
-                "user_shifts": form_raw_s,
-                "early_shifts": form_early_gr,
-                "late_shifts": form_late_gr
-            })
-            st.success("構成データを保存しました。")
-            st.rerun()
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("👥 人員配置")
+        form_n_mgr = st.number_input("管理者数", 0, 5, n_mgr)
+        form_n_reg = st.number_input("一般職数", 1, 20, n_reg)
+        form_total = int(form_n_mgr + form_n_reg)
+        
+        form_names = list(staff_list)
+        if len(form_names) < form_total:
+            form_names.extend([f"スタッフ{i+1}" for i in range(len(form_names), form_total)])
+        form_names = form_names[:form_total]
+        
+        names_ed = st.data_editor(pd.DataFrame({"スタッフ名": form_names}), use_container_width=True, key="names_ed")
+    with c2:
+        st.subheader("📋 シフト構成")
+        form_raw_s = st.text_input("勤務略称 (,) 区切り", raw_s)
+        form_s_list = [s.strip() for s in form_raw_s.split(",") if s.strip()]
+        form_early_gr = st.multiselect("早番グループ", form_s_list, default=[x for x in form_s_list if x in early_gr])
+        form_late_gr = st.multiselect("遅番グループ", form_s_list, default=[x for x in form_s_list if x in late_gr])
+        
+    # タブ1 リアルタイム自動保存
+    new_staff_list = names_ed["スタッフ名"].tolist()
+    st.session_state.config.update({
+        "num_mgr": form_n_mgr,
+        "num_regular": form_n_reg,
+        "staff_names": new_staff_list,
+        "user_shifts": form_raw_s,
+        "early_shifts": form_early_gr,
+        "late_shifts": form_late_gr
+    })
 
+# --- タブ2. 公休・スキル（オートセーブ） ---
 with tab_skl:
-    with st.form("skill_form"):
-        st.subheader("🎓 専門スキル・月間公休数・教育ノルマ")
-        st.write("○:可能, △:見習い（ベテラン必須）, ×:不可")
+    st.subheader("🎓 専門スキル・月間公休数・教育ノルマ")
+    st.write("○:可能, △:見習い（ベテラン必須）, ×:不可")
+    
+    skl_df = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list), ["○","△","×"])
+    ed_skill = st.data_editor(skl_df, use_container_width=True, key="skill_ed")
+    
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        st.subheader("📅 月間公休数設定")
+        hols_df = get_persisted_df("hols", pd.DataFrame(9, index=staff_list, columns=["公休数"]))
+        ed_hols = st.data_editor(hols_df, use_container_width=True, key="hol_ed")
+    with col_c2:
+        st.subheader("🏫 教育ノルマ設定")
+        tr_cols = [f"{s}_見習い回数" for s in s_list]
+        tr_df = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=tr_cols))
+        ed_trainee = st.data_editor(tr_df, use_container_width=True, key="tr_ed")
         
-        # 統合テーブル表示
-        skl_df = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list), ["○","△","×"])
-        ed_skill = st.data_editor(skl_df, use_container_width=True, key="skill_ed")
-        
-        col_c1, col_c2 = st.columns(2)
-        with col_c1:
-            st.subheader("📅 月間公休数設定")
-            hols_df = get_persisted_df("hols", pd.DataFrame(9, index=staff_list, columns=["公休数"]))
-            ed_hols = st.data_editor(hols_df, use_container_width=True, key="hol_ed")
-        with col_c2:
-            st.subheader("🏫 教育ノルマ設定")
-            tr_cols = [f"{s}_見習い回数" for s in s_list]
-            tr_df = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=tr_cols))
-            ed_trainee = st.data_editor(tr_df, use_container_width=True, key="tr_ed")
-            
-        submitted_skl = st.form_submit_button("⚖️ スキル・公休の設定を保存する")
-        if submitted_skl:
-            if "saved_tables" not in st.session_state.config:
-                st.session_state.config["saved_tables"] = {}
-            st.session_state.config["saved_tables"]["skill"] = ed_skill.to_dict()
-            st.session_state.config["saved_tables"]["hols"] = ed_hols.to_dict()
-            st.session_state.config["saved_tables"]["trainee"] = ed_trainee.to_dict()
-            st.success("スキル・公休設定を保存しました。")
-            st.rerun()
+    # タブ2 リアルタイム自動保存
+    if "saved_tables" not in st.session_state.config:
+        st.session_state.config["saved_tables"] = {}
+    st.session_state.config["saved_tables"]["skill"] = ed_skill.to_dict()
+    st.session_state.config["saved_tables"]["hols"] = ed_hols.to_dict()
+    st.session_state.config["saved_tables"]["trainee"] = ed_trainee.to_dict()
 
+# --- タブ3. 勤務表の最適化（申し込み・オートセーブ・AI実行） ---
 with tab_roster:
     _, n_days = calendar.monthrange(year, month)
     days_cols = [f"{d+1}({['月','火','水','木','金','土','日'][calendar.weekday(year,month,d+1)]})" for d in range(n_days)]
     options = ["", "休", "日"] + s_list
 
-    with st.form("roster_input_form"):
-        st.subheader("📝 前月末引継ぎ & 今月の申し込み")
-        p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
-        p_df = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=p_days), ["日","休","早","遅"])
-        r_df = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols), options)
-        
-        c_p, c_r = st.columns([1, 3])
-        with c_p: ed_prev = st.data_editor(p_df, use_container_width=True, key="p_ed")
-        with c_r: ed_req = st.data_editor(r_df, use_container_width=True, key="r_ed")
+    st.subheader("📝 前月末引継ぎ & 今月の申し込み")
+    p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
+    p_df = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=p_days), ["日","休","早","遅"])
+    r_df = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols), options)
+    
+    c_p, c_r = st.columns([1, 3])
+    with c_p: ed_prev = st.data_editor(p_df, use_container_width=True, key="p_ed")
+    with c_r: ed_req = st.data_editor(r_df, use_container_width=True, key="r_ed")
 
-        st.subheader("🚫 不要担務 (祝日Cなど)")
-        ex_df = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
-        ed_ex = st.data_editor(ex_df, use_container_width=True, key="ex_ed")
-        
-        submitted_roster_inputs = st.form_submit_button("📝 各種入力データを保存する")
-        if submitted_roster_inputs:
-            if "saved_tables" not in st.session_state.config:
-                st.session_state.config["saved_tables"] = {}
-            st.session_state.config["saved_tables"]["prev"] = ed_prev.to_dict()
-            st.session_state.config["saved_tables"]["request"] = ed_req.to_dict()
-            st.session_state.config["saved_tables"]["exclude"] = ed_ex.to_dict()
-            st.success("前月履歴・希望・不要担務設定を保存しました。")
-            st.rerun()
+    st.subheader("🚫 不要担務 (祝日Cなど)")
+    ex_df = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
+    ed_ex = st.data_editor(ex_df, use_container_width=True, key="ex_ed")
+    
+    # タブ3 リアルタイム自動保存
+    if "saved_tables" not in st.session_state.config:
+        st.session_state.config["saved_tables"] = {}
+    st.session_state.config["saved_tables"]["prev"] = ed_prev.to_dict()
+    st.session_state.config["saved_tables"]["request"] = ed_req.to_dict()
+    st.session_state.config["saved_tables"]["exclude"] = ed_ex.to_dict()
 
     st.sidebar.download_button("📥 現在の全設定を保存する", json.dumps(st.session_state.config, ensure_ascii=False), f"v80_backup_{year}_{month}.json")
 
-    # --- 数理最適化開始 ---
+    # --- 最適化インプットデータの最新取得 ---
+    opt_skill = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list))
+    opt_hols = get_persisted_df("hols", pd.DataFrame(9, index=staff_list, columns=["公休数"]))
+    opt_prev = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=["前月4日前","前月3日前","前月2日前","前月末日"]))
+    opt_req = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols))
+    opt_ex = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
+
+    # --- データの同期確認テーブル（デバッグ表示） ---
     st.divider()
+    st.write("🔍 **AIが今回読み込んだ各スタッフの公休と申し込みの最終データ（自動同期検証用）**")
+    debug_rows = []
+    for s_idx, s_name in enumerate(staff_list):
+        req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s_idx, di] == "休")
+        target_h = int(opt_hols.iloc[s_idx, 0])
+        debug_rows.append({
+            "スタッフ名": s_name,
+            "設定公休数": target_h,
+            "希望休(休)数": req_off_count,
+            "最終公休目標数": max(target_h, req_off_count)
+        })
+    st.dataframe(pd.DataFrame(debug_rows), use_container_width=True)
+
+    # --- 数理最適化開始 ---
     st.subheader("🧬 勤務表作成エンジンの実行")
-    st.info("※入力テーブルの値を変更した場合は、必ず上部の「保存する」ボタンを押してから実行してください。")
     
     if st.button("🚀 AIによる勤務作成 (最高解モード)"):
         model = cp_model.CpModel()
@@ -222,15 +231,7 @@ with tab_roster:
         E_IDS = [s_list_extended.index(x) + 1 for x in early_gr if x in s_list_extended]
         L_IDS = [s_list_extended.index(x) + 1 for x in late_gr if x in s_list_extended]
         
-        # 変数マッピング
         w_rhythm = w_mixing
-
-        # 確定済みデータをセッションから安全かつ精密に復元
-        opt_skill = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list))
-        opt_hols = get_persisted_df("hols", pd.DataFrame(9, index=staff_list, columns=["公休数"]))
-        opt_prev = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=["前月4日前","前月3日前","前月2日前","前月末日"]))
-        opt_req = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols))
-        opt_ex = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
 
         # Fシフト用スキル判定関数
         def get_skill_for_F(s_idx):
@@ -261,24 +262,21 @@ with tab_roster:
             use_F_var = None
             if wd == 5 and has_C_and_D:
                 use_F_var = model.NewBoolVar(f'use_F_{d}')
-                # 統合勤務Fの使用には巨大なペナルティ（-1000万点）を科すことで「通常勤務では回らない最終手段」としてのみ発動させる
-                score_objs.append(use_F_var * -10000000)
+                # 土曜日にF（統合シフト）を採用するためのペナルティを大幅に緩和（-10000点）
+                # これにより、少しでも公休数や希望休に無理が出るなら、AIはCとDを諦めて積極的にF（統合）を起動させます
+                score_objs.append(use_F_var * -10000)
 
             # A. 担務充足
             for i, s_name in enumerate(s_list_extended):
                 sid = i + 1
                 
-                # 誰かがこのシフトを申し込み（希望）しているか確認
                 is_requested_by_someone = any(opt_req.iloc[s, d] == s_name for s in range(total))
                 
-                # Fは土曜日のみ許可、それ以外の曜日は除外扱い
                 if s_name == "F":
                     is_excl = not (wd == 5 and has_C_and_D)
                 else:
-                    # 誰かが希望している場合は不要担務(除外設定)を強制的に上書きして解除
                     is_excl = (opt_ex.iloc[d, i] and not is_requested_by_someone) or (wd == 6 and s_name == "C" and not is_requested_by_someone)
                 
-                # Fスキル及び通常スキルの判定
                 if s_name == "F":
                     skilled = [s for s in range(total) if get_skill_for_F(s) == "○"]
                     trainee = [s for s in range(total) if get_skill_for_F(s) == "△"]
@@ -291,11 +289,10 @@ with tab_roster:
                 
                 # 土曜日限定のF適用判定ロジック
                 if s_name in ["C", "D", "F"] and wd == 5 and has_C_and_D:
-                    # 不足（0人配置）を許容する変数（希望休によって充足できない場合のクラッシュ防止）
                     under_sat_var = model.NewIntVar(0, 1, f'under_sat_{d}_{sid}')
                     
                     if s_name == "F":
-                        # シフト人数は【等式 (== 1)】で固定。超過は不許可
+                        # シフト人数は等式（== 1）。2名以上重複配置は禁止
                         model.Add(s_sum + t_sum + under_sat_var == 1).OnlyEnforceIf(use_F_var)
                         model.Add(s_sum + t_sum == 0).OnlyEnforceIf(use_F_var.Not())
                     else:  # C または D
@@ -305,7 +302,6 @@ with tab_roster:
                         else:
                             model.Add(s_sum + t_sum + under_sat_var == 1).OnlyEnforceIf(use_F_var.Not())
                     
-                    # 人手不足に対して莫大なペナルティ（希望休を崩すよりは、シフトを空席にすることを認める）
                     score_objs.append(under_sat_var * -100000000)
                     
                 else:
@@ -313,10 +309,8 @@ with tab_roster:
                     if is_excl:
                         model.Add(s_sum + t_sum == 0)
                     else:
-                        # シフト人数は【等式 (== 1)】で固定。2名配置の超過を絶対に許さない
                         under_std_var = model.NewIntVar(0, 1, f'under_std_{d}_{sid}')
                         model.Add(s_sum + t_sum + under_std_var == 1)
-                        # 人手不足に対して莫大なペナルティ
                         score_objs.append(under_std_var * -100000000)
                     
                     # 通常日の見習い同日ベテラン出勤保証
@@ -391,7 +385,6 @@ with tab_roster:
                 mix = model.NewBoolVar(f'mix_{s}_{di}')
                 model.AddBoolAnd([is_early[di], is_late[di+1]]).OnlyEnforceIf(mix)
                 score_objs.append(mix * 500 * w_rhythm)
-                # 連属性抑制
                 if di < n_days - 2:
                     e_block = model.NewBoolVar(f'eb_{s}_{di}')
                     model.Add(is_early[di] + is_early[di+1] + is_early[di+2] - 2 <= e_block)
