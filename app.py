@@ -56,16 +56,34 @@ s_list = [s.strip() for s in raw_s.split(",") if s.strip()]
 early_gr = [x for x in s_list if x in st.session_state.config["early_shifts"]]
 late_gr = [x for x in s_list if x in st.session_state.config["late_shifts"]]
 
-# --- 3. UIの統合タブ構成 ---
-tab_st, tab_skl, tab_roster = st.tabs(["🏗️ 1. 組織と勤務の構成", "⚖️ 2. 公休・スキル・回数", "🧬 3. 勤務表の最適化"])
-
+# --- データの整合性を保ちながら読み込むヘルパー関数（バグ修正版） ---
 def get_persisted_df(key, d_df, categories=None):
     tables = st.session_state.config.get("saved_tables", {})
-    df = pd.DataFrame(tables.get(key)) if key in tables else d_df
+    if key in tables:
+        raw_data = tables.get(key)
+        df = pd.DataFrame(raw_data)
+        # JSON保存や復元によって、インデックスやカラムの型（int/strなど）がズレるのを強制補正
+        if not df.empty:
+            try:
+                df.index = df.index.astype(d_df.index.dtype)
+            except:
+                pass
+            try:
+                df.columns = df.columns.astype(d_df.columns.dtype)
+            except:
+                pass
+    else:
+        df = d_df
+    
+    # 不足している行や列をデフォルト値で安全に補完しながら再構築
     df = df.reindex(index=d_df.index, columns=d_df.columns).fillna(d_df)
     if categories:
-        for c in df.columns: df[c] = pd.Categorical(df[c], categories=categories)
+        for c in df.columns: 
+            df[c] = pd.Categorical(df[c], categories=categories)
     return df
+
+# --- 3. UIの統合タブ構成 ---
+tab_st, tab_skl, tab_roster = st.tabs(["🏗️ 1. 組織と勤務の構成", "⚖️ 2. 公休・スキル・回数", "🧬 3. 勤務表の最適化"])
 
 with tab_st:
     with st.form("structure_form"):
@@ -191,13 +209,12 @@ with tab_roster:
         # 変数マッピング
         w_rhythm = w_mixing
 
-        # 確定済みデータをセッションから安全に再現
-        saved = st.session_state.config.get("saved_tables", {})
-        opt_skill = pd.DataFrame(saved.get("skill")).reindex(index=staff_list, columns=s_list).fillna("○")
-        opt_hols = pd.DataFrame(saved.get("hols")).reindex(index=staff_list, columns=["公休数"]).fillna(9)
-        opt_prev = pd.DataFrame(saved.get("prev")).reindex(index=staff_list, columns=["前月4日前","前月3日前","前月2日前","前月末日"]).fillna("休")
-        opt_req = pd.DataFrame(saved.get("request")).reindex(index=staff_list, columns=days_cols).fillna("")
-        opt_ex = pd.DataFrame(saved.get("exclude")).reindex(index=[d+1 for d in range(n_days)], columns=s_list).fillna(False)
+        # 確定済みデータをセッションから安全に再現（再インデックスバグを防ぐため get_persisted_df を共通化）
+        opt_skill = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list))
+        opt_hols = get_persisted_df("hols", pd.DataFrame(9, index=staff_list, columns=["公休数"]))
+        opt_prev = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=["前月4日前","前月3日前","前月2日前","前月末日"]))
+        opt_req = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols))
+        opt_ex = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
 
         # Fシフト用スキル判定関数
         def get_skill_for_F(s_idx):
@@ -317,10 +334,12 @@ with tab_roster:
                         skill_val = opt_skill.iloc[s, i]
                     if skill_val == "×": model.Add(x[s, d, i+1] == 0)
 
+                # 申し込み（希望）の反映（バグ修正：必ず適用されるハード制約に設定）
                 req = opt_req.iloc[s, d]
                 c_map = {"休": S_OFF, "日": S_NIK, "": -1}
                 for i, n in enumerate(s_list_extended): c_map[n] = i+1
-                if req in c_map and req != "": model.Add(x[s, d, c_map[req]] == 1)
+                if req in c_map and req != "": 
+                    model.Add(x[s, d, c_map[req]] == 1)
                 
                 if d < n_days - 1:
                     not_le = model.NewBoolVar(f'nle_{s}_{d}')
@@ -345,7 +364,7 @@ with tab_roster:
                     model.Add(is_early[di] + is_early[di+1] + is_early[di+2] - 2 <= e_block)
                     score_objs.append(e_block * -1000 * w_rhythm)
 
-            # 管理者・一般職の聖域
+            # 管理者・一般職の聖域（バグ修正：管理者の「平日出勤」をソフト制約に緩和）
             if s < n_mgr:
                 for di in range(n_days):
                     wd_v = calendar.weekday(year, month, di+1)
@@ -353,19 +372,19 @@ with tab_roster:
                         m_o = model.NewBoolVar(f'mo_{s}_{di}')
                         model.Add(is_off[di] == 1).OnlyEnforceIf(m_o)
                         score_objs.append(m_o * 10000)
-                    else: model.Add(is_off[di] == 0) # 平日は基本出勤
+                    else: 
+                        # 平日を基本出勤とする（希望休や目標公休を優先するため、強力なソフト制約にして柔軟性を持たせる）
+                        m_w = model.NewBoolVar(f'mw_{s}_{di}')
+                        model.Add(is_off[di] == 0).OnlyEnforceIf(m_w)
+                        score_objs.append(m_w * 500000)
             else:
                 for di in range(n_days):
                     if opt_req.iloc[s, di] != "日": model.Add(x[s, di, S_NIK] == 0)
 
-            # 公休数不一致を罰則化
+            # 公休数を「絶対厳守（ハード制約）」に変更
             target_h_count = int(opt_hols.iloc[s, 0])
             act_h_count = sum(is_off)
-            h_diff_raw = model.NewIntVar(-n_days, n_days, f'hdr_{s}')
-            model.Add(h_diff_raw == act_h_count - target_h_count)
-            h_diff = model.NewIntVar(0, n_days, f'hd_{s}')
-            model.AddAbsEquality(h_diff, h_diff_raw)
-            score_objs.append(h_diff * -50000 * w_holiday)
+            model.Add(act_h_count == target_h_count)
 
         # C. 担務平準化（公平性）
         for i_sh in range(1, num_types_extended + 1):
@@ -401,4 +420,4 @@ with tab_roster:
             st.dataframe(res_df.style.map(cl), use_container_width=True)
             st.download_button("📥 ダウンロード", res_df.to_csv().encode('utf-8-sig'), "roster.csv")
         else: 
-            st.error("解が見つかりませんでした。入力制約が競合していないか確認してください。（例：管理者が平日に希望休を出している、または合計人数がシフト数に足りないなど）")
+            st.error("解が見つかりませんでした。入力制約が競合していないか確認してください。（例：シフトに対して出勤できるスタッフの総数が不足している、または専門スキルが必要なシフトに対して可能者が少なすぎるなど）")
