@@ -3,7 +3,12 @@ import pandas as pd
 import calendar
 import json
 import re
-from ortools.sat.python import cp_model
+import datetime
+# holidaysライブラリを安全にインポート（環境未導入時でもクラッシュしない設計）
+try:
+    import holidays
+except ImportError:
+    holidays = None
 
 # --- 1. グローバル設定：デザインとレイアウト ---
 st.set_page_config(page_title="AI勤務作成：V80 Ultra Optimizer", page_icon="🛡️", layout="wide")
@@ -125,7 +130,6 @@ with tab_st:
     st.subheader("⏱️ 各担務の超過時間設定")
     st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
     
-    # CとDがあればFを動的に超過時間リストに追加して設定可能にする
     overtime_s_list = list(form_s_list)
     if "C" in form_s_list and "D" in form_s_list:
         overtime_s_list.append("F")
@@ -196,9 +200,18 @@ with tab_roster:
     with c_p: ed_prev = st.data_editor(p_df, use_container_width=True, key="p_ed")
     with c_r: ed_req = st.data_editor(r_df, use_container_width=True, key="r_ed")
 
-    st.subheader("🚫 不要担務 (祝日Cなど)")
-    ex_df = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
-    ed_ex = st.data_editor(ex_df, use_container_width=True, key="ex_ed")
+    # 不要担務と指定日設定を横並びで配置してスッキリしたUIに
+    c_ex, c_des = st.columns([1, 1])
+    with c_ex:
+        st.subheader("🚫 不要担務 (祝日Cなど)")
+        ex_df = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
+        ed_ex = st.data_editor(ex_df, use_container_width=True, key="ex_ed")
+    with c_des:
+        st.subheader("📌 指定日設定")
+        st.write("※ここでチェックを入れた日は「指定日」となり、A・B勤務の超過分が自動的に「0分」になります。")
+        default_des = pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=["指定日"])
+        des_df = get_persisted_df("designated", default_des)
+        ed_des = st.data_editor(des_df, use_container_width=True, key="des_ed")
     
     # タブ3 リアルタイム自動保存
     if "saved_tables" not in st.session_state.config:
@@ -206,6 +219,7 @@ with tab_roster:
     st.session_state.config["saved_tables"]["prev"] = ed_prev.to_dict()
     st.session_state.config["saved_tables"]["request"] = ed_req.to_dict()
     st.session_state.config["saved_tables"]["exclude"] = ed_ex.to_dict()
+    st.session_state.config["saved_tables"]["designated"] = ed_des.to_dict()
 
     st.sidebar.download_button("📥 現在の全設定を保存する", json.dumps(st.session_state.config, ensure_ascii=False), f"v80_backup_{year}_{month}.json")
 
@@ -221,6 +235,7 @@ with tab_roster:
     opt_req = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols))
     opt_ex = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
     opt_overtime = get_persisted_df("overtime", pd.DataFrame({"平日超過分(分)": [30] * len(overtime_s_list), "土曜超過分(分)": [30] * len(overtime_s_list)}, index=overtime_s_list))
+    opt_des = get_persisted_df("designated", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=["指定日"]))
 
     # --- データの同期確認テーブル ---
     st.divider()
@@ -465,6 +480,14 @@ with tab_roster:
             for si in range(total):
                 res_rows.append([id_char[next(j for j in range(num_types_extended+2) if slv.Value(x[si, di, j])==1)] for di in range(n_days)])
 
+            # 日本の祝日判定用データの読み込み
+            jp_holidays = {}
+            if holidays is not None:
+                try:
+                    jp_holidays = holidays.Japan(years=[year])
+                except Exception:
+                    pass
+
             # --- 各人の超過勤務時間、年次休暇、調整休日、差し引きの算出 ---
             total_overtimes = []
             nenkyu_counts = []
@@ -478,6 +501,11 @@ with tab_roster:
                     wd_v = calendar.weekday(year, month, di+1)
                     assigned_char = res_rows[si][di]
                     
+                    # 祝日・指定日判定
+                    d_date = datetime.date(year, month, di+1)
+                    is_holiday = d_date in jp_holidays
+                    is_designated = bool(opt_des.at[di+1, "指定日"]) if di+1 in opt_des.index else False
+                    
                     if wd_v == 6:  # 日曜日
                         # 日曜日のすべての担務には超過分は無し
                         overtime_val = 0
@@ -488,8 +516,11 @@ with tab_roster:
                             overtime_val = int(opt_overtime.loc[assigned_char, "土曜超過分(分)"])
                         else:
                             overtime_val = 0
-                    else:  # 平日
+                    else:  # 平日（月〜金）
                         if assigned_char in ["日", "休"]:
+                            overtime_val = 0
+                        elif (is_holiday or is_designated) and assigned_char in ["A", "B"]:
+                            # 祝日または指定日であれば、平日のA, Bは超過分が「0分」に上書きされます
                             overtime_val = 0
                         elif assigned_char in opt_overtime.index:
                             overtime_val = int(opt_overtime.loc[assigned_char, "平日超過分(分)"])
