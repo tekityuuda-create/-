@@ -12,6 +12,15 @@ try:
 except ImportError:
     holidays = None
 
+# --- 超過時間を HH:MM 形式に変換するヘルパー関数 ---
+def format_minutes_to_hhmm(minutes):
+    is_negative = minutes < 0
+    abs_minutes = abs(minutes)
+    hh = abs_minutes // 60
+    mm = abs_minutes % 60
+    sign = "-" if is_negative else ""
+    return f"{sign}{hh:02d}:{mm:02d}"
+
 # --- 1. グローバル設定：デザインとレイアウト ---
 st.set_page_config(page_title="AI勤務作成：V80 Ultra Optimizer", page_icon="🛡️", layout="wide")
 
@@ -107,7 +116,7 @@ def get_persisted_df(key, d_df, categories=None):
 # --- 3. UIの統合タブ構成 ---
 tab_st, tab_skl, tab_roster = st.tabs(["🏗️ 1. 組織と勤務の構成", "⚖️ 2. 公休・スキル・回数", "🧬 3. 勤務表の最適化"])
 
-# --- タブ1. 組織と勤務の構成（オートセーブ） ---
+# --- タブ1. 組織と勤務 of 構成（オートセーブ） ---
 with tab_st:
     c1, c2 = st.columns(2)
     with c1:
@@ -625,8 +634,8 @@ with tab_roster:
             res_df["年休数(希望)"] = nenkyu_counts
             res_df["設定公休"] = kokyu_values
             res_df["調整休日(調)数"] = adjust_off_counts
-            res_df["総超過(前)"] = [f"{v}分" for v in total_overtimes]
-            res_df["精算後超過"] = [f"{v}分" for v in final_overtimes]
+            res_df["総超過(前)"] = [format_minutes_to_hhmm(v) for v in total_overtimes] # HH:MM形式に変換
+            res_df["精算後超過"] = [format_minutes_to_hhmm(v) for v in final_overtimes] # HH:MM形式に変換
             
             # 色分け表示関数
             def cl(v):
