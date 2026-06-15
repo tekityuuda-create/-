@@ -252,7 +252,7 @@ with tab_roster:
             "休の総数(設定)": total_h,
             "公休分(設定)": kokyu_h,
             "年次休暇(希望休)数": req_off_count,
-            "最終休み目標(総数)": max(total_h, req_off_count)
+            "最終休み目標(総数)": total_h + req_off_count # 休みの総数 ＋ 年次休暇数 に目標を設定
         })
     st.dataframe(pd.DataFrame(debug_rows), use_container_width=True)
 
@@ -273,7 +273,11 @@ with tab_roster:
             f_idx = s_list_extended.index("F")
 
         num_types_extended = len(s_list_extended)
+        
+        # 勤務タイプ定義（新たに「年 S_NEN」を追加して拡張）
         S_OFF, S_NIK = 0, num_types_extended + 1
+        S_CHO = num_types_extended + 2 # 調
+        S_NEN = num_types_extended + 3 # 年(年次休暇)
         
         E_IDS = [s_list_extended.index(x) + 1 for x in early_gr if x in s_list_extended]
         L_IDS = [s_list_extended.index(x) + 1 for x in late_gr if x in s_list_extended]
@@ -290,8 +294,8 @@ with tab_roster:
                 return "○"
             return "△"
 
-        # 変数: x[スタッフ, 日, シフト]
-        x = {(s, d, i): model.NewBoolVar(f'x_{s}_{d}_{i}') for s in range(total) for d in range(n_days) for i in range(num_types_extended + 2)}
+        # 変数: x[スタッフ, 日, シフト]（勤務数に「年」を追加し範囲を num_types_extended + 4 とする）
+        x = {(s, d, i): model.NewBoolVar(f'x_{s}_{d}_{i}') for s in range(total) for d in range(n_days) for i in range(num_types_extended + 4)}
         score_objs = []
 
         # 前月情報デコード
@@ -382,15 +386,20 @@ with tab_roster:
                         score_objs.append(no_vet_var * -50000000)
 
             # 1日1人1回 (Hard Constraint)
-            for s in range(total): model.Add(sum(x[s, d, i] for i in range(num_types_extended+2)) == 1)
+            for s in range(total): model.Add(sum(x[s, d, i] for i in range(num_types_extended+4)) == 1)
 
         # 個人別の高度な最適化
         for s in range(total):
             is_early = [model.NewBoolVar(f'ie_{s}_{d}') for d in range(n_days)]
             is_late = [model.NewBoolVar(f'il_{s}_{d}') for d in range(n_days)]
-            is_off = [x[s, d, S_OFF] for d in range(n_days)]
+            
+            # 休み判定（「休 S_OFF」または「調 S_CHO」または「年 S_NEN」の論理和を is_off とする）
+            is_off = [model.NewBoolVar(f'io_{s}_{d}') for d in range(n_days)]
             
             for d in range(n_days):
+                # 休、調、年のいずれかが割り当てられている日を「休み」に統合
+                model.Add(is_off[d] == x[s, d, S_OFF] + x[s, d, S_CHO] + x[s, d, S_NEN])
+
                 # 判定用スイッチ変数の連動
                 model.Add(sum(x[s, d, i] for i in E_IDS) == 1).OnlyEnforceIf(is_early[d])
                 model.Add(sum(x[s, d, i] for i in E_IDS) == 0).OnlyEnforceIf(is_early[d].Not())
@@ -406,12 +415,18 @@ with tab_roster:
                     if skill_val == "×": model.Add(x[s, d, i+1] == 0)
 
                 # 申し込み（希望）の反映（絶対に崩さない最強のハード制約）
+                # 希望休の「休」は S_NEN（年次休暇）に強制マッピング
                 req = opt_req.iloc[s, d]
-                c_map = {"休": S_OFF, "日": S_NIK, "": -1}
+                c_map = {"休": S_NEN, "日": S_NIK, "": -1}
                 for i, n in enumerate(s_list_extended): c_map[n] = i+1
                 if req in c_map and req != "": 
                     model.Add(x[s, d, c_map[req]] == 1)
                 
+                # 申し込み「休」ではない日は、S_NEN (年) が割り当てられないように制限する
+                # （これにより、申し込み日のみがピンポイントで「年」となります）
+                if req != "休":
+                    model.Add(x[s, d, S_NEN] == 0)
+
                 if d < n_days - 1:
                     not_le = model.NewBoolVar(f'nle_{s}_{d}')
                     model.Add(is_late[d] + is_early[d+1] <= 1).OnlyEnforceIf(not_le)
@@ -452,14 +467,23 @@ with tab_roster:
                         nik_var = x[s, di, S_NIK]
                         score_objs.append(nik_var * -10000000)
 
-            # 休み総数の厳守（ハード制約）
-            # 休み希望("休")の合計数が「休の総数」を上回っている場合は、目標休日数を希望数に合わせて自動補正する
-            req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s, di] == "休")
-            total_off_limit = int(opt_hols.iloc[s, 0])  # 「休の総数」は1列目
-            target_h_count = max(total_off_limit, req_off_count)
+            # 各種休み日数の個別厳格配置（ハード制約）
+            req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s, di] == "休") # 希望年休数
+            total_off_limit = int(opt_hols.iloc[s, 0])  # 休の総数
+            kokyu_val = int(opt_hols.iloc[s, 1])        # 公休分
             
-            act_h_count = sum(is_off)
-            model.Add(act_h_count == target_h_count)
+            # 調整休日（調）の割り当て総数 ＝ 設定された「休の総数」 － 「公休分」
+            target_cho_count = total_off_limit - kokyu_val
+            if target_cho_count < 0:
+                target_cho_count = 0
+            
+            # 各休みの数を個別に等式で完全固定
+            # 年休（年）＝ 希望休数
+            model.Add(sum(x[s, d, S_NEN] for d in range(n_days)) == req_off_count)
+            # 公休（休）＝ 設定公休分
+            model.Add(sum(x[s, d, S_OFF] for d in range(n_days)) == kokyu_val)
+            # 調整休（調）＝ 調整休数
+            model.Add(sum(x[s, d, S_CHO] for d in range(n_days)) == target_cho_count)
 
         # C. 担務平準化（公平性）
         for i_sh in range(1, num_types_extended + 1):
@@ -477,10 +501,10 @@ with tab_roster:
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
             st.success("✨ 勤務作成と調整が完了しました。申し込み（希望）および公休数は最優先で100%厳格に履行されています。")
             res_rows = []
-            id_char = {S_OFF: "休", S_NIK: "日"}
+            id_char = {S_OFF: "休", S_NIK: "日", S_CHO: "調", S_NEN: "年"} # 年を追加
             for i, n in enumerate(s_list_extended): id_char[i+1] = n
             for si in range(total):
-                res_rows.append([id_char[next(j for j in range(num_types_extended+2) if slv.Value(x[si, di, j])==1)] for di in range(n_days)])
+                res_rows.append([id_char[next(j for j in range(num_types_extended+4) if slv.Value(x[si, di, j])==1)] for di in range(n_days)])
 
             # 日本の祝日判定用データの読み込み
             jp_holidays = {}
@@ -509,20 +533,18 @@ with tab_roster:
                     is_designated = bool(opt_des.at[di+1, "指定日"]) if di+1 in opt_des.index else False
                     
                     if wd_v == 6:  # 日曜日
-                        # 日曜日のすべての担務には超過分は無し
                         overtime_val = 0
                     elif wd_v == 5:  # 土曜日
-                        if assigned_char in ["A", "B", "日", "休"]:
+                        if assigned_char in ["A", "B", "日", "休", "調", "年"]: # 年を追加
                             overtime_val = 0
                         elif assigned_char in opt_overtime.index:
                             overtime_val = int(opt_overtime.loc[assigned_char, "土曜超過分(分)"])
                         else:
                             overtime_val = 0
                     else:  # 平日（月〜金）
-                        if assigned_char in ["日", "休"]:
+                        if assigned_char in ["日", "休", "調", "年"]: # 年を追加
                             overtime_val = 0
                         elif (is_holiday or is_designated) and assigned_char in ["A", "B"]:
-                            # 祝日または指定日であれば、平日のA, Bは超過分が「0分」に上書きされます
                             overtime_val = 0
                         elif assigned_char in opt_overtime.index:
                             overtime_val = int(opt_overtime.loc[assigned_char, "平日超過分(分)"])
@@ -531,16 +553,12 @@ with tab_roster:
                     
                     staff_overtime_sum += overtime_val
                 
-                actual_offs = res_rows[si].count("休")
-                # 年次休暇数 (申し込みにおける「休」の数)
-                nenkyu_count = sum(1 for di in range(n_days) if opt_req.iloc[si, di] == "休")
-                # 設定公休分 (holsデータフレームの2列目)
-                kokyu_val = int(opt_hols.iloc[si, 1])
-                
-                # 調整休日数 = 休みの総数 - 年次休暇数 - 公休分 (※負数は0日)
-                adjust_off = actual_offs - nenkyu_count - kokyu_val
-                if adjust_off < 0:
-                    adjust_off = 0
+                # 年次休暇数（カレンダー上の「年」の数をダイレクトにカウント）
+                nenkyu_count = res_rows[si].count("年")
+                # 設定公休分（カレンダー上の「休」の数をダイレクトにカウント）
+                kokyu_val = res_rows[si].count("休")
+                # 調整休日数（カレンダー上の「調」の数をダイレクトにカウント）
+                adjust_off = res_rows[si].count("調")
                 
                 # 差し引き分 (調整休日数 * 445分)
                 minus_val = adjust_off * 445
@@ -553,19 +571,21 @@ with tab_roster:
                 final_overtimes.append(final_overtime)
 
             res_df = pd.DataFrame(res_rows, index=staff_list, columns=days_cols)
-            res_df["休の総数"] = [row.count("休") for row in res_rows]
+            res_df["休の総数"] = [row.count("休") + row.count("調") + row.count("年") for row in res_rows]
             res_df["年休数(希望)"] = nenkyu_counts
             res_df["設定公休"] = kokyu_values
-            res_df["調整休日数"] = adjust_off_counts
+            res_df["調整休日(調)数"] = adjust_off_counts
             res_df["総超過(前)"] = [f"{v}分" for v in total_overtimes]
             res_df["精算後超過"] = [f"{v}分" for v in final_overtimes]
             
             # 色分け表示関数
             def cl(v):
                 if v == "休": return 'background-color: #ffcccc'
+                if v == "調": return 'background-color: #ffcc99; font-weight: bold; color: #7a3e00;' # 調整休日はオレンジ系
+                if v == "年": return 'background-color: #ffb3d9; font-weight: bold; color: #8a004b;' # 年次休暇はピンク系
                 if v == "日": return 'background-color: #e0f0ff'
                 if v in early_gr: return 'background-color: #ffffcc'
-                if v == "F": return 'background-color: #e8d7ff; font-weight: bold; color: #4a148c;' # Fは紫色の特別カラー
+                if v == "F": return 'background-color: #e8d7ff; font-weight: bold; color: #4a148c;'
                 return 'background-color: #ccffcc'
                 
             st.dataframe(res_df.style.map(cl), use_container_width=True)
