@@ -274,7 +274,7 @@ with tab_roster:
 
         num_types_extended = len(s_list_extended)
         
-        # 勤務タイプ定義（新たに「年 S_NEN」を追加して拡張）
+        # 勤務タイプ定義（「年 S_NEN」を追加して拡張）
         S_OFF, S_NIK = 0, num_types_extended + 1
         S_CHO = num_types_extended + 2 # 調
         S_NEN = num_types_extended + 3 # 年(年次休暇)
@@ -283,6 +283,14 @@ with tab_roster:
         L_IDS = [s_list_extended.index(x) + 1 for x in late_gr if x in s_list_extended]
         
         w_rhythm = w_mixing
+
+        # 日本の祝日判定用データの取得
+        jp_holidays = {}
+        if holidays is not None:
+            try:
+                jp_holidays = holidays.Japan(years=[year])
+            except Exception:
+                pass
 
         # Fシフト用スキル判定関数
         def get_skill_for_F(s_idx):
@@ -396,6 +404,9 @@ with tab_roster:
             # 休み判定（「休 S_OFF」または「調 S_CHO」または「年 S_NEN」の論理和を is_off とする）
             is_off = [model.NewBoolVar(f'io_{s}_{d}') for d in range(n_days)]
             
+            # --- 働き溜め（超過残高累積）の動的検証用リストの構成 ---
+            daily_overtime_exprs = []
+            
             for d in range(n_days):
                 # 休、調、年のいずれかが割り当てられている日を「休み」に統合
                 model.Add(is_off[d] == x[s, d, S_OFF] + x[s, d, S_CHO] + x[s, d, S_NEN])
@@ -431,6 +442,45 @@ with tab_roster:
                     not_le = model.NewBoolVar(f'nle_{s}_{d}')
                     model.Add(is_late[d] + is_early[d+1] <= 1).OnlyEnforceIf(not_le)
                     score_objs.append(not_le * 2000000 * w_h_rule)
+
+                # --- 日ごとの獲得超過時間の1次式の組み立て ---
+                wd_v = calendar.weekday(year, month, d+1)
+                d_date = datetime.date(year, month, d+1)
+                is_holiday = d_date in jp_holidays
+                is_designated = bool(opt_des.at[d+1, "指定日"]) if d+1 in opt_des.index else False
+                
+                terms = []
+                if wd_v == 6:  # 日曜日
+                    pass  # 超過分0
+                elif wd_v == 5:  # 土曜日
+                    for i, s_name in enumerate(s_list_extended):
+                        sid = i + 1
+                        if s_name in ["A", "B"]:
+                            continue
+                        over_val = 0
+                        if s_name in opt_overtime.index:
+                            over_val = int(opt_overtime.loc[s_name, "土曜超過分(分)"])
+                        if over_val > 0:
+                            terms.append(x[s, d, sid] * over_val)
+                else:  # 平日 (月〜金)
+                    for i, s_name in enumerate(s_list_extended):
+                        sid = i + 1
+                        if (is_holiday or is_designated) and s_name in ["A", "B"]:
+                            continue
+                        over_val = 0
+                        if s_name in opt_overtime.index:
+                            over_val = int(opt_overtime.loc[s_name, "平日超過分(分)"])
+                        if over_val > 0:
+                            terms.append(x[s, d, sid] * over_val)
+                
+                daily_overtime_exprs.append(sum(terms))
+
+            # --- 「調（調整休日）は働き溜めした後に付与する」の動的検証 ---
+            # 0日目〜各日dにおいて、[これまでの累積獲得超過時間] >= [これまでの累積調の消費時間（445分 * 累積調数）]を厳格強制
+            for d in range(n_days):
+                cum_overtime = sum(daily_overtime_exprs[k] for k in range(d + 1))
+                cum_cho_count = sum(x[s, k, S_CHO] for k in range(d + 1))
+                model.Add(cum_overtime >= cum_cho_count * 445)
 
             # 連勤制限(4日まで、5日目に罰則)
             hist_w = [1 if opt_prev.iloc[s, k] != "休" else 0 for k in range(4)] + [(1 - is_off[di]) for di in range(n_days)]
@@ -535,14 +585,14 @@ with tab_roster:
                     if wd_v == 6:  # 日曜日
                         overtime_val = 0
                     elif wd_v == 5:  # 土曜日
-                        if assigned_char in ["A", "B", "日", "休", "調", "年"]: # 年を追加
+                        if assigned_char in ["A", "B", "日", "休", "調", "年"]: # 年・調を追加
                             overtime_val = 0
                         elif assigned_char in opt_overtime.index:
                             overtime_val = int(opt_overtime.loc[assigned_char, "土曜超過分(分)"])
                         else:
                             overtime_val = 0
                     else:  # 平日（月〜金）
-                        if assigned_char in ["日", "休", "調", "年"]: # 年を追加
+                        if assigned_char in ["日", "休", "調", "年"]: # 年・調を追加
                             overtime_val = 0
                         elif (is_holiday or is_designated) and assigned_char in ["A", "B"]:
                             overtime_val = 0
