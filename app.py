@@ -122,6 +122,21 @@ with tab_st:
         form_early_gr = st.multiselect("早番グループ", form_s_list, default=[x for x in form_s_list if x in early_gr])
         form_late_gr = st.multiselect("遅番グループ", form_s_list, default=[x for x in form_s_list if x in late_gr])
         
+    st.subheader("⏱️ 各担務の超過時間設定")
+    st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
+    
+    # CとDがあればFを動的に超過時間リストに追加して設定可能にする
+    overtime_s_list = list(form_s_list)
+    if "C" in form_s_list and "D" in form_s_list:
+        overtime_s_list.append("F")
+
+    default_overtime = pd.DataFrame({
+        "平日超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list],
+        "土曜超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list]
+    }, index=overtime_s_list)
+    overtime_df = get_persisted_df("overtime", default_overtime)
+    ed_overtime = st.data_editor(overtime_df, use_container_width=True, key="overtime_ed")
+
     # タブ1 リアルタイム自動保存
     new_staff_list = names_ed["スタッフ名"].tolist()
     st.session_state.config.update({
@@ -132,6 +147,9 @@ with tab_st:
         "early_shifts": form_early_gr,
         "late_shifts": form_late_gr
     })
+    if "saved_tables" not in st.session_state.config:
+        st.session_state.config["saved_tables"] = {}
+    st.session_state.config["saved_tables"]["overtime"] = ed_overtime.to_dict()
 
 # --- タブ2. 公休・スキル（オートセーブ） ---
 with tab_skl:
@@ -143,8 +161,12 @@ with tab_skl:
     
     col_c1, col_c2 = st.columns(2)
     with col_c1:
-        st.subheader("📅 月間公休数設定")
-        hols_df = get_persisted_df("hols", pd.DataFrame(9, index=staff_list, columns=["公休数"]))
+        st.subheader("📅 月間休日数設定")
+        default_hols = pd.DataFrame({
+            "休の総数": [9] * len(staff_list),
+            "公休分": [8] * len(staff_list)
+        }, index=staff_list)
+        hols_df = get_persisted_df("hols", default_hols)
         ed_hols = st.data_editor(hols_df, use_container_width=True, key="hol_ed")
     with col_c2:
         st.subheader("🏫 教育ノルマ設定")
@@ -165,7 +187,7 @@ with tab_roster:
     days_cols = [f"{d+1}({['月','火','水','木','金','土','日'][calendar.weekday(year,month,d+1)]})" for d in range(n_days)]
     options = ["", "休", "日"] + s_list
 
-    st.subheader("📝 前月末引継ぎ & 今月の申し込み")
+    st.subheader("📝 前月末引継ぎ & 今月の申し込み (※「休」は年次休暇として集計します)")
     p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
     p_df = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=p_days), ["日","休","早","遅"])
     r_df = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols), options)
@@ -187,25 +209,33 @@ with tab_roster:
 
     st.sidebar.download_button("📥 現在の全設定を保存する", json.dumps(st.session_state.config, ensure_ascii=False), f"v80_backup_{year}_{month}.json")
 
+    # 超過時間設定用のF対応リスト
+    overtime_s_list = list(s_list)
+    if "C" in s_list and "D" in s_list:
+        overtime_s_list.append("F")
+
     # --- 最適化インプットデータの最新取得 ---
     opt_skill = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list))
-    opt_hols = get_persisted_df("hols", pd.DataFrame(9, index=staff_list, columns=["公休数"]))
-    opt_prev = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=["前月4日前","前月3日前","前月2日前","前月末日"]))
+    opt_hols = get_persisted_df("hols", pd.DataFrame({"休の総数": [9] * len(staff_list), "公休分": [8] * len(staff_list)}, index=staff_list))
+    opt_prev = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=p_days))
     opt_req = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols))
     opt_ex = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
+    opt_overtime = get_persisted_df("overtime", pd.DataFrame({"平日超過分(分)": [30] * len(overtime_s_list), "土曜超過分(分)": [30] * len(overtime_s_list)}, index=overtime_s_list))
 
-    # --- データの同期確認テーブル（デバッグ表示） ---
+    # --- データの同期確認テーブル ---
     st.divider()
-    st.write("🔍 **AIが今回読み込んだ各スタッフの公休と申し込みの最終データ（自動同期検証用）**")
+    st.write("🔍 **AIが今回読み込んだ各スタッフの公休と年次休暇の最終データ（自動同期検証用）**")
     debug_rows = []
     for s_idx, s_name in enumerate(staff_list):
         req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s_idx, di] == "休")
-        target_h = int(opt_hols.iloc[s_idx, 0])
+        total_h = int(opt_hols.iloc[s_idx, 0])  # 休の総数
+        kokyu_h = int(opt_hols.iloc[s_idx, 1])  # 公休分
         debug_rows.append({
             "スタッフ名": s_name,
-            "設定公休数": target_h,
-            "希望休(休)数": req_off_count,
-            "最終公休目標数": max(target_h, req_off_count)
+            "休の総数(設定)": total_h,
+            "公休分(設定)": kokyu_h,
+            "年次休暇(希望休)数": req_off_count,
+            "最終休み目標(総数)": max(total_h, req_off_count)
         })
     st.dataframe(pd.DataFrame(debug_rows), use_container_width=True)
 
@@ -262,9 +292,7 @@ with tab_roster:
             use_F_var = None
             if wd == 5 and has_C_and_D:
                 use_F_var = model.NewBoolVar(f'use_F_{d}')
-                # 土曜日にF（統合シフト）を採用するためのペナルティを大幅に緩和（-10000点）
-                # これにより、少しでも公休数や希望休に無理が出るなら、AIはCとDを諦めて積極的にF（統合）を起動させます
-                score_objs.append(use_F_var * -10000)
+                score_objs.append(use_F_var * -1000)
 
             # A. 担務充足
             for i, s_name in enumerate(s_list_extended):
@@ -292,7 +320,6 @@ with tab_roster:
                     under_sat_var = model.NewIntVar(0, 1, f'under_sat_{d}_{sid}')
                     
                     if s_name == "F":
-                        # シフト人数は等式（== 1）。2名以上重複配置は禁止
                         model.Add(s_sum + t_sum + under_sat_var == 1).OnlyEnforceIf(use_F_var)
                         model.Add(s_sum + t_sum == 0).OnlyEnforceIf(use_F_var.Not())
                     else:  # C または D
@@ -399,26 +426,20 @@ with tab_roster:
                         model.Add(is_off[di] == 1).OnlyEnforceIf(m_o)
                         score_objs.append(m_o * 10000)
                     else: 
-                        # 平日は出勤を強く推奨
-                        # （管理者は制限なく日勤 (S_NIK) に逃げることができるため、一般職が余った日は自動的に管理者が日勤を担当します）
                         m_w = model.NewBoolVar(f'mw_{s}_{di}')
                         model.Add(is_off[di] == 0).OnlyEnforceIf(m_w)
                         score_objs.append(m_w * 500000)
             else:
                 for di in range(n_days):
                     if opt_req.iloc[s, di] != "日": 
-                        # 一般職の日勤は原則禁止。
-                        # 全員の公休目標を絶対厳守した際、数学的にどうしてもシフト枠が不足して全員があぶれる極限状態のみ、
-                        # 日勤へ逃げることを許容（ソフト制約化）。
-                        # 管理者の日勤（ペナルティなし）より非常に重いペナルティ（-1000万点）を課すことで、
-                        # 「まずは管理者が優先的に日勤に回り、それでも溢れる最悪の場合のみ一般職を日勤にする」ことを保証します。
                         nik_var = x[s, di, S_NIK]
                         score_objs.append(nik_var * -10000000)
 
-            # 目標公休数の厳守（ハード制約）
-            # 休み希望("休")の合計数が目標公休数を上回っている場合は、目標公休数を希望数に合わせて自動補正する
+            # 休み総数の厳守（ハード制約）
+            # 休み希望("休")の合計数が「休の総数」を上回っている場合は、目標休日数を希望数に合わせて自動補正する
             req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s, di] == "休")
-            target_h_count = max(int(opt_hols.iloc[s, 0]), req_off_count)
+            total_off_limit = int(opt_hols.iloc[s, 0])  # 「休の総数」は1列目
+            target_h_count = max(total_off_limit, req_off_count)
             
             act_h_count = sum(is_off)
             model.Add(act_h_count == target_h_count)
@@ -443,8 +464,68 @@ with tab_roster:
             for i, n in enumerate(s_list_extended): id_char[i+1] = n
             for si in range(total):
                 res_rows.append([id_char[next(j for j in range(num_types_extended+2) if slv.Value(x[si, di, j])==1)] for di in range(n_days)])
+
+            # --- 各人の超過勤務時間、年次休暇、調整休日、差し引きの算出 ---
+            total_overtimes = []
+            nenkyu_counts = []
+            kokyu_values = []
+            adjust_off_counts = []
+            final_overtimes = []
+
+            for si in range(total):
+                staff_overtime_sum = 0
+                for di in range(n_days):
+                    wd_v = calendar.weekday(year, month, di+1)
+                    assigned_char = res_rows[si][di]
+                    
+                    if wd_v == 6:  # 日曜日
+                        # 日曜日のすべての担務には超過分は無し
+                        overtime_val = 0
+                    elif wd_v == 5:  # 土曜日
+                        if assigned_char in ["A", "B", "日", "休"]:
+                            overtime_val = 0
+                        elif assigned_char in opt_overtime.index:
+                            overtime_val = int(opt_overtime.loc[assigned_char, "土曜超過分(分)"])
+                        else:
+                            overtime_val = 0
+                    else:  # 平日
+                        if assigned_char in ["日", "休"]:
+                            overtime_val = 0
+                        elif assigned_char in opt_overtime.index:
+                            overtime_val = int(opt_overtime.loc[assigned_char, "平日超過分(分)"])
+                        else:
+                            overtime_val = 0
+                    
+                    staff_overtime_sum += overtime_val
+                
+                actual_offs = res_rows[si].count("休")
+                # 年次休暇数 (申し込みにおける「休」の数)
+                nenkyu_count = sum(1 for di in range(n_days) if opt_req.iloc[si, di] == "休")
+                # 設定公休分 (holsデータフレームの2列目)
+                kokyu_val = int(opt_hols.iloc[si, 1])
+                
+                # 調整休日数 = 休みの総数 - 年次休暇数 - 公休分 (※負数は0日)
+                adjust_off = actual_offs - nenkyu_count - kokyu_val
+                if adjust_off < 0:
+                    adjust_off = 0
+                
+                # 差し引き分 (調整休日数 * 445分)
+                minus_val = adjust_off * 445
+                final_overtime = staff_overtime_sum - minus_val
+                
+                total_overtimes.append(staff_overtime_sum)
+                nenkyu_counts.append(nenkyu_count)
+                kokyu_values.append(kokyu_val)
+                adjust_off_counts.append(adjust_off)
+                final_overtimes.append(final_overtime)
+
             res_df = pd.DataFrame(res_rows, index=staff_list, columns=days_cols)
-            res_df["公休数"] = [row.count("休") for row in res_rows]
+            res_df["休の総数"] = [row.count("休") for row in res_rows]
+            res_df["年休数(希望)"] = nenkyu_counts
+            res_df["設定公休"] = kokyu_values
+            res_df["調整休日数"] = adjust_off_counts
+            res_df["総超過(前)"] = [f"{v}分" for v in total_overtimes]
+            res_df["精算後超過"] = [f"{v}分" for v in final_overtimes]
             
             # 色分け表示関数
             def cl(v):
