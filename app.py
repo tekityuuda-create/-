@@ -33,7 +33,7 @@ if 'config' not in st.session_state:
     }
 
 st.title("勤務作成エンジン (Team Excellence Pass)")
-st.info("💡 **リアルタイム自動保存機能搭載**: 画面の入力や変更はすべてリアルタイムで保存されます。「保存ボタン」を押す必要はありません。")
+st.info("💡 **リアルタイム自動保存機能搭載**: 画面的入力や変更はすべてリアルタイムで保存されます。「保存ボタン」を押す必要はありません。")
 
 # --- 2. データのバックアップ・復元管理 ---
 with st.sidebar:
@@ -116,7 +116,7 @@ def get_persisted_df(key, d_df, categories=None):
 # --- 3. UIの統合タブ構成 ---
 tab_st, tab_skl, tab_roster = st.tabs(["🏗️ 1. 組織と勤務の構成", "⚖️ 2. 公休・スキル・回数", "🧬 3. 勤務表の最適化"])
 
-# --- タブ1. 組織と勤務 of 構成（オートセーブ） ---
+# --- タブ1. 組織と勤務の構成（オートセーブ） ---
 with tab_st:
     c1, c2 = st.columns(2)
     with c1:
@@ -490,6 +490,12 @@ with tab_roster:
                 cum_overtime = sum(daily_overtime_exprs[k] for k in range(d + 1))
                 cum_cho_count = sum(x[s, k, S_CHO] for k in range(d + 1))
                 model.Add(cum_overtime >= cum_cho_count * 445)
+
+            # 「調（調整休日）」は必ず平日にのみ配置（土日への配置はバグ回避のため絶対に禁止）
+            for d in range(n_days):
+                wd_v = calendar.weekday(year, month, d+1)
+                if wd_v >= 5:  # 土曜日(5)または日曜日(6)
+                    model.Add(x[s, d, S_CHO] == 0)
 
             # 連勤制限(4日まで、5日目に罰則)
             hist_w = [1 if opt_prev.iloc[s, k] != "休" else 0 for k in range(4)] + [(1 - is_off[di]) for di in range(n_days)]
