@@ -4,6 +4,8 @@ import calendar
 import json
 import re
 import datetime
+# OR-Tools の最適化モジュールをインポート
+from ortools.sat.python import cp_model
 # holidaysライブラリを安全にインポート（環境未導入時でもクラッシュしない設計）
 try:
     import holidays
@@ -330,7 +332,7 @@ with tab_roster:
                 s_sum = sum(x[s, d, sid] for s in skilled)
                 t_sum = sum(x[s, d, sid] for s in trainee)
                 
-                # 土曜日限定のF適用判定ロジック
+                # 土曜日限定F適用判定ロジック
                 if s_name in ["C", "D", "F"] and wd == 5 and has_C_and_D:
                     under_sat_var = model.NewIntVar(0, 1, f'under_sat_{d}_{sid}')
                     
