@@ -32,8 +32,12 @@ if 'config' not in st.session_state:
         "year": 2025, "month": 1, "saved_tables": {}
     }
 
+# データフレームのセッション永続化用ディクショナリの初期化
+if "dfs" not in st.session_state:
+    st.session_state.dfs = {}
+
 st.title("勤務作成エンジン (Team Excellence Pass)")
-st.info("💡 **リアルタイム自動保存機能搭載**: 画面的入力や変更はすべてリアルタイムで保存されます。「保存ボタン」を押す必要はありません。")
+st.info("💡 **リアルタイム自動保存機能搭載**: 画面の入力や変更はすべてリアルタイムで保存されます。「保存ボタン」を押す必要はありません。")
 
 # --- 2. データのバックアップ・復元管理 ---
 with st.sidebar:
@@ -42,7 +46,11 @@ with st.sidebar:
     if up_file:
         try:
             st.session_state.config.update(json.load(up_file))
+            # アップロード成功時は、セッション内の DataFrame の強制再構築を行うためにキーを初期化
+            if "last_state_key" in st.session_state:
+                del st.session_state.last_state_key
             st.success("全ての変数の整合性を確認し復元しました。")
+            st.rerun()
         except: st.error("エラー：ファイルの構造が不正です。")
 
     st.divider()
@@ -113,10 +121,46 @@ def get_persisted_df(key, d_df, categories=None):
             df[c] = pd.Categorical(df[c], categories=categories)
     return df
 
+# 超過時間設定用のF対応リスト
+overtime_s_list = list(s_list)
+if "C" in s_list and "D" in s_list:
+    overtime_s_list.append("F")
+
+# カレンダーの準備
+_, n_days = calendar.monthrange(year, month)
+days_cols = [f"{d+1}({['月','火','水','木','金','土','日'][calendar.weekday(year,month,d+1)]})" for d in range(n_days)]
+options = ["", "休", "日"] + s_list
+p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
+
+# --- 【超重要】ステート同期・DataFrame完全永続化システム ---
+# 現在の基本設定パラメーターのハッシュ（キー）を生成
+current_state_key = (
+    tuple(staff_list),
+    tuple(days_cols),
+    tuple(s_list),
+    tuple(overtime_s_list),
+    year,
+    month
+)
+
+# 構成変更や年月変更が発生した時、または初回起動時にのみ、セッション内の DataFrame を再構築。
+# 単なるセルの値変更によるRerunでは、データフレームを絶対に再作成せず、セッション内のデータを保持し続けます。
+if "last_state_key" not in st.session_state or st.session_state.last_state_key != current_state_key:
+    st.session_state.dfs["skill"] = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list))
+    st.session_state.dfs["hols"] = get_persisted_df("hols", pd.DataFrame({"休の総数": [9] * len(staff_list), "公休分": [8] * len(staff_list)}, index=staff_list))
+    st.session_state.dfs["trainee"] = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=[f"{s}_見習い回数" for s in s_list]))
+    st.session_state.dfs["prev"] = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=p_days))
+    st.session_state.dfs["request"] = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols))
+    st.session_state.dfs["exclude"] = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
+    st.session_state.dfs["overtime"] = get_persisted_df("overtime", pd.DataFrame({"平日超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list], "土曜超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list]}, index=overtime_s_list))
+    st.session_state.dfs["designated"] = get_persisted_df("designated", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=["指定日"]))
+    
+    st.session_state.last_state_key = current_state_key
+
 # --- 3. UIの統合タブ構成 ---
 tab_st, tab_skl, tab_roster = st.tabs(["🏗️ 1. 組織と勤務の構成", "⚖️ 2. 公休・スキル・回数", "🧬 3. 勤務表の最適化"])
 
-# --- タブ1. 組織と勤務の構成（オートセーブ） ---
+# --- タブ1. 組織と勤務の構成（オートセーブ・完全永続化） ---
 with tab_st:
     c1, c2 = st.columns(2)
     with c1:
@@ -141,18 +185,12 @@ with tab_st:
     st.subheader("⏱️ 各担務の超過時間設定")
     st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
     
-    overtime_s_list = list(form_s_list)
-    if "C" in form_s_list and "D" in form_s_list:
-        overtime_s_list.append("F")
+    # セッション内の DataFrame を直接渡して編集させ、瞬時にセッションに書き戻す（リセットの完全防止）
+    ed_overtime = st.data_editor(st.session_state.dfs["overtime"], use_container_width=True, key="overtime_ed")
+    st.session_state.dfs["overtime"] = ed_overtime
+    st.session_state.config["saved_tables"]["overtime"] = ed_overtime.to_dict()
 
-    default_overtime = pd.DataFrame({
-        "平日超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list],
-        "土曜超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list]
-    }, index=overtime_s_list)
-    overtime_df = get_persisted_df("overtime", default_overtime)
-    ed_overtime = st.data_editor(overtime_df, use_container_width=True, key="overtime_ed")
-
-    # タブ1 リアルタイム自動保存
+    # パラメータの自動同期
     new_staff_list = names_ed["スタッフ名"].tolist()
     st.session_state.config.update({
         "num_mgr": form_n_mgr,
@@ -162,91 +200,64 @@ with tab_st:
         "early_shifts": form_early_gr,
         "late_shifts": form_late_gr
     })
-    if "saved_tables" not in st.session_state.config:
-        st.session_state.config["saved_tables"] = {}
-    st.session_state.config["saved_tables"]["overtime"] = ed_overtime.to_dict()
 
-# --- タブ2. 公休・スキル（オートセーブ） ---
+# --- タブ2. 公休・スキル（オートセーブ・完全永続化） ---
 with tab_skl:
     st.subheader("🎓 専門スキル・月間公休数・教育ノルマ")
     st.write("○:可能, △:見習い（ベテラン必須）, ×:不可")
     
-    skl_df = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list), ["○","△","×"])
-    ed_skill = st.data_editor(skl_df, use_container_width=True, key="skill_ed")
+    ed_skill = st.data_editor(st.session_state.dfs["skill"], use_container_width=True, key="skill_ed")
+    st.session_state.dfs["skill"] = ed_skill
+    st.session_state.config["saved_tables"]["skill"] = ed_skill.to_dict()
     
     col_c1, col_c2 = st.columns(2)
     with col_c1:
         st.subheader("📅 月間休日数設定")
-        default_hols = pd.DataFrame({
-            "休の総数": [9] * len(staff_list),
-            "公休分": [8] * len(staff_list)
-        }, index=staff_list)
-        hols_df = get_persisted_df("hols", default_hols)
-        ed_hols = st.data_editor(hols_df, use_container_width=True, key="hol_ed")
+        ed_hols = st.data_editor(st.session_state.dfs["hols"], use_container_width=True, key="hol_ed")
+        st.session_state.dfs["hols"] = ed_hols
+        st.session_state.config["saved_tables"]["hols"] = ed_hols.to_dict()
     with col_c2:
         st.subheader("🏫 教育ノルマ設定")
-        tr_cols = [f"{s}_見習い回数" for s in s_list]
-        tr_df = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=tr_cols))
-        ed_trainee = st.data_editor(tr_df, use_container_width=True, key="tr_ed")
-        
-    # タブ2 リアルタイム自動保存
-    if "saved_tables" not in st.session_state.config:
-        st.session_state.config["saved_tables"] = {}
-    st.session_state.config["saved_tables"]["skill"] = ed_skill.to_dict()
-    st.session_state.config["saved_tables"]["hols"] = ed_hols.to_dict()
-    st.session_state.config["saved_tables"]["trainee"] = ed_trainee.to_dict()
+        ed_trainee = st.data_editor(st.session_state.dfs["trainee"], use_container_width=True, key="tr_ed")
+        st.session_state.dfs["trainee"] = ed_trainee
+        st.session_state.config["saved_tables"]["trainee"] = ed_trainee.to_dict()
 
-# --- タブ3. 勤務表の最適化（申し込み・オートセーブ・AI実行） ---
+# --- タブ3. 勤務表の最適化（申し込み・オートセーブ・AI実行・完全永続化） ---
 with tab_roster:
-    _, n_days = calendar.monthrange(year, month)
-    days_cols = [f"{d+1}({['月','火','水','木','金','土','日'][calendar.weekday(year,month,d+1)]})" for d in range(n_days)]
-    options = ["", "休", "日"] + s_list
-
     st.subheader("📝 前月末引継ぎ & 今月の申し込み (※「休」は年次休暇として集計します)")
-    p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
-    p_df = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=p_days), ["日","休","早","遅"])
-    r_df = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols), options)
     
     c_p, c_r = st.columns([1, 3])
-    with c_p: ed_prev = st.data_editor(p_df, use_container_width=True, key="p_ed")
-    with c_r: ed_req = st.data_editor(r_df, use_container_width=True, key="r_ed")
+    with c_p: 
+        ed_prev = st.data_editor(st.session_state.dfs["prev"], use_container_width=True, key="p_ed")
+        st.session_state.dfs["prev"] = ed_prev
+        st.session_state.config["saved_tables"]["prev"] = ed_prev.to_dict()
+    with c_r: 
+        ed_req = st.data_editor(st.session_state.dfs["request"], use_container_width=True, key="r_ed")
+        st.session_state.dfs["request"] = ed_req
+        st.session_state.config["saved_tables"]["request"] = ed_req.to_dict()
 
-    # 不要担務と指定日設定を横並びで配置してスッキリしたUIに
+    # 不要担務と指定日設定
     c_ex, c_des = st.columns([1, 1])
     with c_ex:
         st.subheader("🚫 不要担務 (祝日Cなど)")
-        ex_df = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
-        ed_ex = st.data_editor(ex_df, use_container_width=True, key="ex_ed")
+        ed_ex = st.data_editor(st.session_state.dfs["exclude"], use_container_width=True, key="ex_ed")
+        st.session_state.dfs["exclude"] = ed_ex
+        st.session_state.config["saved_tables"]["exclude"] = ed_ex.to_dict()
     with c_des:
         st.subheader("📌 指定日設定")
         st.write("※ここでチェックを入れた日は「指定日」となり、A・B勤務の超過分が自動的に「0分」になります。")
-        default_des = pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=["指定日"])
-        des_df = get_persisted_df("designated", default_des)
-        ed_des = st.data_editor(des_df, use_container_width=True, key="des_ed")
-    
-    # タブ3 リアルタイム自動保存
-    if "saved_tables" not in st.session_state.config:
-        st.session_state.config["saved_tables"] = {}
-    st.session_state.config["saved_tables"]["prev"] = ed_prev.to_dict()
-    st.session_state.config["saved_tables"]["request"] = ed_req.to_dict()
-    st.session_state.config["saved_tables"]["exclude"] = ed_ex.to_dict()
-    st.session_state.config["saved_tables"]["designated"] = ed_des.to_dict()
+        ed_des = st.data_editor(st.session_state.dfs["designated"], use_container_width=True, key="des_ed")
+        st.session_state.dfs["designated"] = ed_des
+        st.session_state.config["saved_tables"]["designated"] = ed_des.to_dict()
 
-    st.sidebar.download_button("📥 現在の全設定を保存する", json.dumps(st.session_state.config, ensure_ascii=False), f"v80_backup_{year}_{month}.json")
-
-    # 超過時間設定用のF対応リスト
-    overtime_s_list = list(s_list)
-    if "C" in s_list and "D" in s_list:
-        overtime_s_list.append("F")
-
-    # --- 最適化インプットデータの最新取得 ---
-    opt_skill = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list))
-    opt_hols = get_persisted_df("hols", pd.DataFrame({"休の総数": [9] * len(staff_list), "公休分": [8] * len(staff_list)}, index=staff_list))
-    opt_prev = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=p_days))
-    opt_req = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols))
-    opt_ex = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
-    opt_overtime = get_persisted_df("overtime", pd.DataFrame({"平日超過分(分)": [30] * len(overtime_s_list), "土曜超過分(分)": [30] * len(overtime_s_list)}, index=overtime_s_list))
-    opt_des = get_persisted_df("designated", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=["指定日"]))
+    # --- 最適化インプットデータの最新同期取得 ---
+    opt_skill = st.session_state.dfs["skill"]
+    opt_hols = st.session_state.dfs["hols"]
+    opt_prev = st.session_state.dfs["prev"]
+    opt_req = st.session_state.dfs["request"]
+    opt_ex = st.session_state.dfs["exclude"]
+    opt_overtime = st.session_state.dfs["overtime"]
+    opt_des = st.session_state.dfs["designated"]
 
     # --- データの同期確認テーブル ---
     st.divider()
@@ -261,7 +272,7 @@ with tab_roster:
             "休の総数(設定)": total_h,
             "公休分(設定)": kokyu_h,
             "年次休暇(希望休)数": req_off_count,
-            "最終休み目標(総数)": total_h + req_off_count # 休みの総数 ＋ 年次休暇数 に目標を設定
+            "最終休み目標(総数)": total_h + req_off_count
         })
     st.dataframe(pd.DataFrame(debug_rows), use_container_width=True)
 
