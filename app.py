@@ -32,14 +32,8 @@ def store_df(key):
         # 1. セルの編集（edited_rows）を正確にマッピングして適用
         if "edited_rows" in changes:
             for row_idx_str, col_changes in changes["edited_rows"].items():
-                # 行インデックスの型（RangeIndexによる整数型か、スタッフ名等の文字列型か）を自動判別
-                if isinstance(df.index, pd.RangeIndex) or (len(df.index) > 0 and isinstance(df.index[0], (int, float))):
-                    # インデックスが 1, 2... などの整数型の場合、行番号から対応する日付インデックスを正しく取得
-                    idx_val = df.index[int(row_idx_str)]
-                else:
-                    # インデックスが文字列（スタッフ名）の場合は、行番号からスタッフ名を取得
-                    idx_val = df.index[int(row_idx_str)]
-                
+                row_idx = int(row_idx_str)
+                idx_val = df.index[row_idx]
                 for col_name, new_val in col_changes.items():
                     df.at[idx_val, col_name] = new_val
                     
@@ -52,7 +46,7 @@ def store_df(key):
                     
         # 3. 行削除があった場合のセーフティ
         if "deleted_rows" in changes and len(changes["deleted_rows"]) > 0:
-            df = df.drop(changes["deleted_rows"]).reset_index(drop=True)
+            df = df.drop(df.index[changes["deleted_rows"]]).reset_index(drop=True)
             
         # 更新された DataFrame を確実にセッションのマスターに保存
         st.session_state[key] = df
@@ -73,6 +67,10 @@ if 'config' not in st.session_state:
         "year": 2025, "month": 1, "saved_tables": {}
     }
 
+# データフレームのセッション永続化用ディクショナリの初期化
+if "dfs" not in st.session_state:
+    st.session_state.dfs = {}
+
 st.title("勤務作成エンジン (Team Excellence Pass)")
 st.info("💡 **リアルタイム自動保存機能搭載**: 画面の入力や変更はすべてリアルタイムで保存されます。入力した値が元に戻ることはありません。")
 
@@ -88,7 +86,8 @@ with st.sidebar:
                 del st.session_state.last_state_key
             st.success("全ての変数の整合性を確認し復元しました。")
             st.rerun()
-        except: st.error("エラー：ファイルの構造が不正です。")
+        except Exception:
+            st.error("エラー：ファイルの構造が不正です。")
 
     st.divider()
     st.header("🎯 AI解析の優先戦略")
@@ -183,14 +182,17 @@ current_state_key = (
 # 構成変更や年月変更が発生した時、または初回起動時にのみ、セッション内の DataFrame を再構築。
 # 単なるセルの値変更によるRerunでは、データフレームを絶対に再作成せず、セッション内のデータを保持し続けます。
 if "last_state_key" not in st.session_state or st.session_state.last_state_key != current_state_key:
-    st.session_state["skill"] = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list))
+    form_names = list(staff_list)
+    # 【バグ修正】 get_persisted_df の第3引数に選択肢カテゴリを漏れなく確実にパス
+    st.session_state["skill"] = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list), ["○", "△", "×"])
     st.session_state["hols"] = get_persisted_df("hols", pd.DataFrame({"休の総数": [9] * len(staff_list), "公休分": [8] * len(staff_list)}, index=staff_list))
     st.session_state["trainee"] = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=[f"{s}_見習い回数" for s in s_list]))
-    st.session_state["prev"] = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=p_days))
-    st.session_state["request"] = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols))
+    st.session_state["prev"] = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=p_days), ["日", "休", "早", "遅"])
+    st.session_state["request"] = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols), options)
     st.session_state["exclude"] = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
     st.session_state["overtime"] = get_persisted_df("overtime", pd.DataFrame({"平日超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list], "土曜超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list]}, index=overtime_s_list))
     st.session_state["designated"] = get_persisted_df("designated", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=["指定日"]))
+    st.session_state["names"] = pd.DataFrame({"スタッフ名": form_names})
     
     st.session_state.last_state_key = current_state_key
 
@@ -206,15 +208,7 @@ with tab_st:
         form_n_reg = st.number_input("一般職数", 1, 20, n_reg)
         form_total = int(form_n_mgr + form_n_reg)
         
-        form_names = list(staff_list)
-        if len(form_names) < form_total:
-            form_names.extend([f"スタッフ{i+1}" for i in range(len(form_names), form_total)])
-        form_names = form_names[:form_total]
-        
         # スタッフ名変更もマスターに格納して状態追跡
-        if "names" not in st.session_state or len(st.session_state["names"]) != len(form_names):
-            st.session_state["names"] = pd.DataFrame({"スタッフ名": form_names})
-        
         st.data_editor(st.session_state["names"], use_container_width=True, key="_names", on_change=store_df, args=["names"])
     with c2:
         st.subheader("📋 シフト構成")
@@ -226,7 +220,7 @@ with tab_st:
     st.subheader("⏱️ 各担務の超過時間設定")
     st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
     
-    # 循環代入（=ed_overtime）を完全に廃止し、on_change コールバックのみでステート管理
+    # 循環代入を廃止し、on_change コールバックのみでステート管理
     st.data_editor(st.session_state["overtime"], use_container_width=True, key="_overtime", on_change=store_df, args=["overtime"])
 
     # パラメータの同期
@@ -245,8 +239,23 @@ with tab_skl:
     st.subheader("🎓 専門スキル・月間公休数・教育ノルマ")
     st.write("○:可能, △:見習い（ベテラン必須）, ×:不可")
     
-    # 代入を撤廃し、コールバックだけで安全に同期
-    st.data_editor(st.session_state["skill"], use_container_width=True, key="_skill", on_change=store_df, args=["skill"])
+    # 【不具合完全解消】 column_config を明示的に指定してSelectboxColumnとしてレンダリングを完全固定
+    column_config_skill = {
+        col: st.column_config.SelectboxColumn(
+            col,
+            options=["○", "△", "×"],
+            required=True
+        )
+        for col in s_list
+    }
+    st.data_editor(
+        st.session_state["skill"], 
+        column_config=column_config_skill,
+        use_container_width=True, 
+        key="_skill", 
+        on_change=store_df, 
+        args=["skill"]
+    )
     
     col_c1, col_c2 = st.columns(2)
     with col_c1:
@@ -260,11 +269,43 @@ with tab_skl:
 with tab_roster:
     st.subheader("📝 前月末引継ぎ & 今月の申し込み (※「休」は年次休暇として集計します)")
     
+    # 選択肢設定を column_config を用いて強制固定
+    column_config_prev = {
+        col: st.column_config.SelectboxColumn(
+            col,
+            options=["日", "休", "早", "遅"],
+            required=True
+        )
+        for col in p_days
+    }
+    column_config_request = {
+        col: st.column_config.SelectboxColumn(
+            col,
+            options=options,
+            required=False
+        )
+        for col in days_cols
+    }
+
     c_p, c_r = st.columns([1, 3])
     with c_p: 
-        st.data_editor(st.session_state["prev"], use_container_width=True, key="_prev", on_change=store_df, args=["prev"])
+        st.data_editor(
+            st.session_state["prev"], 
+            column_config=column_config_prev,
+            use_container_width=True, 
+            key="_prev", 
+            on_change=store_df, 
+            args=["prev"]
+        )
     with c_r: 
-        st.data_editor(st.session_state["request"], use_container_width=True, key="_request", on_change=store_df, args=["request"])
+        st.data_editor(
+            st.session_state["request"], 
+            column_config=column_config_request,
+            use_container_width=True, 
+            key="_request", 
+            on_change=store_df, 
+            args=["request"]
+        )
 
     # 不要担務と指定日設定
     c_ex, c_des = st.columns([1, 1])
