@@ -132,7 +132,7 @@ days_cols = [f"{d+1}({['月','火','水','木','金','土','日'][calendar.weekd
 options = ["", "休", "日"] + s_list
 p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
 
-# --- 【超重要】ステート同期・DataFrame完全永続化システム ---
+# --- 【重要】ステート同期・DataFrame完全永続化システム ---
 # 現在の基本設定パラメーターのハッシュ（キー）を生成
 current_state_key = (
     tuple(staff_list),
@@ -160,7 +160,7 @@ if "last_state_key" not in st.session_state or st.session_state.last_state_key !
 # --- 3. UIの統合タブ構成 ---
 tab_st, tab_skl, tab_roster = st.tabs(["🏗️ 1. 組織と勤務の構成", "⚖️ 2. 公休・スキル・回数", "🧬 3. 勤務表の最適化"])
 
-# --- タブ1. 組織と勤務の構成（オートセーブ・完全永続化） ---
+# --- タブ1. 組織と勤務の構成（オートセーブ・メモリ分離） ---
 with tab_st:
     c1, c2 = st.columns(2)
     with c1:
@@ -185,8 +185,8 @@ with tab_st:
     st.subheader("⏱️ 各担務の超過時間設定")
     st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
     
-    # セッション内の DataFrame を直接渡して編集させ、瞬時にセッションに書き戻す（リセットの完全防止）
-    ed_overtime = st.data_editor(st.session_state.dfs["overtime"], use_container_width=True, key="overtime_ed")
+    # 【バグ修正】 .copy() を用いて複製オブジェクトを渡すことでリセットを100%防止
+    ed_overtime = st.data_editor(st.session_state.dfs["overtime"].copy(), use_container_width=True, key="overtime_ed")
     st.session_state.dfs["overtime"] = ed_overtime
     st.session_state.config["saved_tables"]["overtime"] = ed_overtime.to_dict()
 
@@ -201,38 +201,43 @@ with tab_st:
         "late_shifts": form_late_gr
     })
 
-# --- タブ2. 公休・スキル（オートセーブ・完全永続化） ---
+# --- タブ2. 公休・スキル（オートセーブ・メモリ分離） ---
 with tab_skl:
     st.subheader("🎓 専門スキル・月間公休数・教育ノルマ")
     st.write("○:可能, △:見習い（ベテラン必須）, ×:不可")
     
-    ed_skill = st.data_editor(st.session_state.dfs["skill"], use_container_width=True, key="skill_ed")
+    # 【バグ修正】 .copy() による複製
+    ed_skill = st.data_editor(st.session_state.dfs["skill"].copy(), use_container_width=True, key="skill_ed")
     st.session_state.dfs["skill"] = ed_skill
     st.session_state.config["saved_tables"]["skill"] = ed_skill.to_dict()
     
     col_c1, col_c2 = st.columns(2)
     with col_c1:
         st.subheader("📅 月間休日数設定")
-        ed_hols = st.data_editor(st.session_state.dfs["hols"], use_container_width=True, key="hol_ed")
+        # 【バグ修正】 .copy() による複製
+        ed_hols = st.data_editor(st.session_state.dfs["hols"].copy(), use_container_width=True, key="hol_ed")
         st.session_state.dfs["hols"] = ed_hols
         st.session_state.config["saved_tables"]["hols"] = ed_hols.to_dict()
     with col_c2:
         st.subheader("🏫 教育ノルマ設定")
-        ed_trainee = st.data_editor(st.session_state.dfs["trainee"], use_container_width=True, key="tr_ed")
+        # 【バグ修正】 .copy() による複製
+        ed_trainee = st.data_editor(st.session_state.dfs["trainee"].copy(), use_container_width=True, key="tr_ed")
         st.session_state.dfs["trainee"] = ed_trainee
         st.session_state.config["saved_tables"]["trainee"] = ed_trainee.to_dict()
 
-# --- タブ3. 勤務表の最適化（申し込み・オートセーブ・AI実行・完全永続化） ---
+# --- タブ3. 勤務表の最適化（申し込み・オートセーブ・AI実行・メモリ分離） ---
 with tab_roster:
     st.subheader("📝 前月末引継ぎ & 今月の申し込み (※「休」は年次休暇として集計します)")
     
     c_p, c_r = st.columns([1, 3])
     with c_p: 
-        ed_prev = st.data_editor(st.session_state.dfs["prev"], use_container_width=True, key="p_ed")
+        # 【バグ修正】 .copy() による複製
+        ed_prev = st.data_editor(st.session_state.dfs["prev"].copy(), use_container_width=True, key="p_ed")
         st.session_state.dfs["prev"] = ed_prev
         st.session_state.config["saved_tables"]["prev"] = ed_prev.to_dict()
     with c_r: 
-        ed_req = st.data_editor(st.session_state.dfs["request"], use_container_width=True, key="r_ed")
+        # 【バグ修正】 .copy() による複製
+        ed_req = st.data_editor(st.session_state.dfs["request"].copy(), use_container_width=True, key="r_ed")
         st.session_state.dfs["request"] = ed_req
         st.session_state.config["saved_tables"]["request"] = ed_req.to_dict()
 
@@ -240,13 +245,15 @@ with tab_roster:
     c_ex, c_des = st.columns([1, 1])
     with c_ex:
         st.subheader("🚫 不要担務 (祝日Cなど)")
-        ed_ex = st.data_editor(st.session_state.dfs["exclude"], use_container_width=True, key="ex_ed")
+        # 【バグ修正】 .copy() による複製
+        ed_ex = st.data_editor(st.session_state.dfs["exclude"].copy(), use_container_width=True, key="ex_ed")
         st.session_state.dfs["exclude"] = ed_ex
         st.session_state.config["saved_tables"]["exclude"] = ed_ex.to_dict()
     with c_des:
         st.subheader("📌 指定日設定")
         st.write("※ここでチェックを入れた日は「指定日」となり、A・B勤務の超過分が自動的に「0分」になります。")
-        ed_des = st.data_editor(st.session_state.dfs["designated"], use_container_width=True, key="des_ed")
+        # 【バグ修正】 .copy() による複製
+        ed_des = st.data_editor(st.session_state.dfs["designated"].copy(), use_container_width=True, key="des_ed")
         st.session_state.dfs["designated"] = ed_des
         st.session_state.config["saved_tables"]["designated"] = ed_des.to_dict()
 
