@@ -68,6 +68,10 @@ if 'config' not in st.session_state:
         "year": 2025, "month": 1, "saved_tables": {}
     }
 
+# データフレームのセッション永続化用ディクショナリの初期化
+if "dfs" not in st.session_state:
+    st.session_state.dfs = {}
+
 st.title("勤務作成エンジン (Team Excellence Pass)")
 st.info("💡 **リアルタイム自動保存機能搭載**: 画面の入力や変更はすべてリアルタイムで保存されます。入力した値が元に戻ることはありません。")
 
@@ -88,7 +92,7 @@ with st.sidebar:
 
     st.divider()
     st.header("🎯 AI解析の優先戦略")
-    st.info("優先したい指標を高めることで、AI of 思考パターンが動的に変化します。")
+    st.info("優先したい指標を高めることで、AIの思考パターンが動的に変化します。")
     w_h_rule = st.slider("ルールの厳守度", 0, 100, 95)
     w_mixing = st.slider("早遅ミキシング（バランス）", 0, 100, 70)
     w_fair = st.slider("担当回数の公平性", 0, 100, 50)
@@ -113,7 +117,7 @@ s_list = [s.strip() for s in raw_s.split(",") if s.strip()]
 early_gr = [x for x in s_list if x in st.session_state.config["early_shifts"]]
 late_gr = [x for x in s_list if x in st.session_state.config["late_shifts"]]
 
-# --- データの整合性を完全に保つための高精度復元関数（曜日・型ズレの吸収） ---
+# --- データの整合性を完全に保つための高精度復元関数（行番号位置による安全引き継ぎ） ---
 def get_persisted_df(key, d_df, categories=None):
     tables = st.session_state.config.get("saved_tables", {})
     if key in tables:
@@ -134,14 +138,15 @@ def get_persisted_df(key, d_df, categories=None):
         # 3. 目的とする d_df の構造で新しい DataFrame を構築
         result_df = pd.DataFrame(index=d_df.index, columns=d_df.columns)
         
-        # 4. スタッフ名と日付数字を一致させて値を安全に移植する（型ズレ・並び順変動・曜日変更をすべて吸収）
-        for r_target in d_df.index:
-            r_str = str(r_target)
-            if r_str in df.index:
+        # 4. 行番号（位置）およびカラム名（日付）ベースで値を安全に移植する
+        # （これによりスタッフ名の順番や名前自体が変更されても、行に設定されていたデータは100%確実に新スタッフに引き継がれます）
+        for r_idx, r_target in enumerate(d_df.index):
+            if r_idx < len(df.index):
+                r_source = df.index[r_idx]
                 for c_target in d_df.columns:
                     c_clean = clean_col_name(c_target)
                     if c_clean in df.columns:
-                        result_df.at[r_target, c_target] = df.at[r_str, c_clean]
+                        result_df.at[r_target, c_target] = df.at[r_source, c_clean]
         
         # 5. 未入力やミスマッチの部分をデフォルト値で補完
         result_df = result_df.fillna(d_df)
@@ -180,7 +185,7 @@ current_state_key = (
 # 単なるセルの値変更によるRerunでは、データフレームを絶対に再作成せず、セッション内のデータを保持し続けます。
 if "last_state_key" not in st.session_state or st.session_state.last_state_key != current_state_key:
     form_names = list(staff_list)
-    # 【不具合完全解消：Categories引数の漏れなき確実な再定義】
+    # Categories引数の確実なパス ＆ 各データの安全復元
     st.session_state["skill"] = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list), ["○", "△", "×"])
     st.session_state["hols"] = get_persisted_df("hols", pd.DataFrame({"休の総数": [9] * len(staff_list), "公休分": [8] * len(staff_list)}, index=staff_list))
     st.session_state["trainee"] = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=[f"{s}_見習い回数" for s in s_list]))
@@ -189,14 +194,16 @@ if "last_state_key" not in st.session_state or st.session_state.last_state_key !
     st.session_state["exclude"] = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
     st.session_state["overtime"] = get_persisted_df("overtime", pd.DataFrame({"平日超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list], "土曜超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list]}, index=overtime_s_list))
     st.session_state["designated"] = get_persisted_df("designated", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=["指定日"]))
-    st.session_state["names"] = pd.DataFrame({"スタッフ名": form_names})
+    
+    # 【不具合完全解消】スタッフ名テーブル(names)についても get_persisted_df を通して安全にセッションから復元
+    st.session_state["names"] = get_persisted_df("names", pd.DataFrame({"スタッフ名": form_names}))
     
     st.session_state.last_state_key = current_state_key
 
 # --- 3. UIの統合タブ構成 ---
 tab_st, tab_skl, tab_roster = st.tabs(["🏗️ 1. 組織と勤務の構成", "⚖️ 2. 公休・スキル・回数", "🧬 3. 勤務表の最適化"])
 
-# --- タブ1. 組織と勤務の構成（コールバック非破壊保存） ---
+# --- タブ1. 組織と勤務の構成（自動保存＆メモリバグ完全解消） ---
 with tab_st:
     c1, c2 = st.columns(2)
     with c1:
@@ -217,7 +224,7 @@ with tab_st:
     st.subheader("⏱️ 各担務の超過時間設定")
     st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
     
-    # 循環上書き代入（=st.data_editor）を完全に廃止し、on_change コールバックのみでステート管理
+    # 循環上書き代入を完全に廃止し、on_change コールバックのみでステート管理
     st.data_editor(st.session_state["overtime"], use_container_width=True, key="_overtime", on_change=store_df, args=["overtime"])
 
     # パラメータの同期
@@ -231,7 +238,7 @@ with tab_st:
         "late_shifts": form_late_gr
     })
 
-# --- タブ2. 公休・スキル（コールバック非破壊保存） ---
+# --- タブ2. 公休・スキル（自動保存＆メモリバグ完全解消） ---
 with tab_skl:
     st.subheader("🎓 専門スキル・月間公休数・教育ノルマ")
     st.write("○:可能, △:見習い（ベテラン必須）, ×:不可")
@@ -262,7 +269,7 @@ with tab_skl:
         st.subheader("🏫 教育ノルマ設定")
         st.data_editor(st.session_state["trainee"], use_container_width=True, key="_trainee", on_change=store_df, args=["trainee"])
 
-# --- タブ3. 勤務表の最適化（申し込み・コールバック非破壊保存・AI実行） ---
+# --- タブ3. 勤務表の最適化（自動保存＆メモリバグ完全解消） ---
 with tab_roster:
     st.subheader("📝 前月末引継ぎ & 今月の申し込み (※「休」は年次休暇として集計します)")
     
@@ -367,6 +374,14 @@ with tab_roster:
         L_IDS = [s_list_extended.index(x) + 1 for x in late_gr if x in s_list_extended]
         
         w_rhythm = w_mixing
+
+        # 日本の祝日判定用データの取得
+        jp_holidays = {}
+        if holidays is not None:
+            try:
+                jp_holidays = holidays.Japan(years=[year])
+            except Exception:
+                pass
 
         # Fシフト用スキル判定関数
         def get_skill_for_F(s_idx):
