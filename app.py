@@ -75,7 +75,7 @@ if "dfs" not in st.session_state:
 st.title("勤務作成エンジン (Team Excellence Pass)")
 st.info("💡 **リアルタイム自動保存機能搭載**: 画面の入力や変更はすべてリアルタイムで保存されます。入力した値が元に戻ることはありません。")
 
-# --- 2. データのバックアップ・復元管理 ---
+# --- 2. データのバックアップ・復元管理（サイドバー） ---
 with st.sidebar:
     st.header("📂 設定データの完全同期")
     up_file = st.file_uploader("設定ファイルを読み込む", type="json")
@@ -102,6 +102,14 @@ with st.sidebar:
     year = int(st.number_input("年", 2024, 2030, st.session_state.config["year"]))
     month = int(st.number_input("月", 1, 12, st.session_state.config["month"]))
 
+    st.divider()
+    # 【不具合完全解消】ダウンロードボタンをサイドバーに固定し、どのタブにいても常に現在の全設定を1クリックで保存できるように設計
+    st.download_button(
+        "📥 現在の全設定を保存する", 
+        json.dumps(st.session_state.config, ensure_ascii=False), 
+        f"v80_backup_{year}_{month}.json"
+    )
+
 # 現在の有効な設定パラメータを読み込み
 n_mgr = st.session_state.config["num_mgr"]
 n_reg = st.session_state.config["num_regular"]
@@ -117,7 +125,7 @@ s_list = [s.strip() for s in raw_s.split(",") if s.strip()]
 early_gr = [x for x in s_list if x in st.session_state.config["early_shifts"]]
 late_gr = [x for x in s_list if x in st.session_state.config["late_shifts"]]
 
-# --- データの整合性を完全に保つための高精度復元関数（行番号位置による安全引き継ぎ） ---
+# --- データの整合性を完全に保つための高精度復元関数（曜日・型ズレの吸収） ---
 def get_persisted_df(key, d_df, categories=None):
     tables = st.session_state.config.get("saved_tables", {})
     if key in tables:
@@ -194,8 +202,6 @@ if "last_state_key" not in st.session_state or st.session_state.last_state_key !
     st.session_state["exclude"] = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
     st.session_state["overtime"] = get_persisted_df("overtime", pd.DataFrame({"平日超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list], "土曜超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list]}, index=overtime_s_list))
     st.session_state["designated"] = get_persisted_df("designated", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=["指定日"]))
-    
-    # 【不具合完全解消】スタッフ名テーブル(names)についても get_persisted_df を通して安全にセッションから復元
     st.session_state["names"] = get_persisted_df("names", pd.DataFrame({"スタッフ名": form_names}))
     
     st.session_state.last_state_key = current_state_key
@@ -374,14 +380,6 @@ with tab_roster:
         L_IDS = [s_list_extended.index(x) + 1 for x in late_gr if x in s_list_extended]
         
         w_rhythm = w_mixing
-
-        # 日本の祝日判定用データの取得
-        jp_holidays = {}
-        if holidays is not None:
-            try:
-                jp_holidays = holidays.Japan(years=[year])
-            except Exception:
-                pass
 
         # Fシフト用スキル判定関数
         def get_skill_for_F(s_idx):
