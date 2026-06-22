@@ -5,13 +5,33 @@ import json
 import re
 import datetime
 import io  # Excel書き出し用のバイナリストリームモジュール
-# OR-Tools の最適化モジュールをインポート
-from ortools.sat.python import cp_model
-# holidaysライブラリを安全にインポート（環境未導入時でもクラッシュしない設計）
+import sys
+import subprocess
+
+# 【不具合完全解消：openpyxlの自動検出・動的インストール】
+try:
+    import openpyxl
+except ImportError:
+    try:
+        # 実行環境に openpyxl がない場合、自動的にバックグラウンドでインストールして補完します
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
+        import openpyxl
+    except Exception:
+        st.error("Excel出力用のライブラリ 'openpyxl' の自動インストールに失敗しました。環境上で `pip install openpyxl` を実行してください。")
+
+# 【不具合完全解消：holidaysの自動検出・動的インストール】
 try:
     import holidays
 except ImportError:
-    holidays = None
+    try:
+        # 祝日判定用ライブラリもなければ自動補完します
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "holidays"])
+        import holidays
+    except Exception:
+        holidays = None
+
+# OR-Tools の最適化モジュールをインポート
+from ortools.sat.python import cp_model
 
 # --- 超過時間を HH:MM 形式に変換するヘルパー関数 ---
 def format_minutes_to_hhmm(minutes):
@@ -23,7 +43,6 @@ def format_minutes_to_hhmm(minutes):
     return f"{sign}{hh:02d}:{mm:02d}"
 
 # --- 【完全な解決策：コールバック駆動非破壊ステート保存関数】 ---
-# ユーザーが編集を終えた瞬間（Rerunが走る前）に、差分辞書を解析してセッション内のデータフレームを直接更新します。
 def store_df(key):
     pkey = '_' + key
     if pkey in st.session_state:
@@ -121,7 +140,7 @@ with st.sidebar:
         f"v80_backup_{year}_{month}.json"
     )
 
-# --- 日本の祝日判定用データの取得（NameError回避のためグローバルスコープへ移動） ---
+# --- 日本の祝日判定用データの取得（NameError回避のためグローバルスコープに固定） ---
 jp_holidays = {}
 if holidays is not None:
     try:
