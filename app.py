@@ -8,23 +8,22 @@ import io  # Excel書き出し用のバイナリストリームモジュール
 import sys
 import subprocess
 
-# 【不具合完全解消：openpyxlの自動検出・動的インストール】
+# 【不具合安全対策：openpyxlの自動検出・動的インストール】
+# 動的インストールに失敗した場合は、エラーメッセージを一時非表示にしてソルバーの実行とCSV出力を優先します。
 try:
     import openpyxl
 except ImportError:
     try:
-        # 実行環境に openpyxl がない場合、自動的にバックグラウンドでインストールして補完します
         subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
         import openpyxl
     except Exception:
-        st.error("Excel出力用のライブラリ 'openpyxl' の自動インストールに失敗しました。環境上で `pip install openpyxl` を実行してください。")
+        openpyxl = None
 
-# 【不具合完全解消：holidaysの自動検出・動的インストール】
+# 【不具合安全対策：holidaysの自動検出・動的インストール】
 try:
     import holidays
 except ImportError:
     try:
-        # 祝日判定用ライブラリもなければ自動補完します
         subprocess.check_call([sys.executable, "-m", "pip", "install", "holidays"])
         import holidays
     except Exception:
@@ -641,7 +640,7 @@ with tab_roster:
                     model.Add(is_early[di] + is_early[di+1] + is_early[di+2] - 2 <= e_block)
                     score_objs.append(e_block * -1000 * w_rhythm)
 
-            # 管理者・一般職の聖域
+            # 管理者・一般職 of 聖域
             if s < n_mgr:
                 for di in range(n_days):
                     wd_v = calendar.weekday(year, month, di+1)
@@ -774,18 +773,34 @@ with tab_roster:
                 
             st.dataframe(res_df.style.map(cl), use_container_width=True)
             
-            # --- 【不具合完全解消】CSVから書式（色）付きExcelエクスポートに変更 ---
-            # メモリ内にExcelデータを書き出し、PatternFill書式を内包させて出力
-            towrite = io.BytesIO()
-            with pd.ExcelWriter(towrite, engine='openpyxl') as writer:
-                res_df.style.map(cl).to_excel(writer, index=True, sheet_name="Roster")
-            excel_data = towrite.getvalue()
+            # --- CSVから書式（色）付きExcelエクスポートに変更（環境制限によるフォールバック付き） ---
+            excel_success = False
+            excel_data = None
+            if openpyxl is not None:
+                try:
+                    towrite = io.BytesIO()
+                    with pd.ExcelWriter(towrite, engine='openpyxl') as writer:
+                        res_df.style.map(cl).to_excel(writer, index=True, sheet_name="Roster")
+                    excel_data = towrite.getvalue()
+                    excel_success = True
+                except Exception:
+                    excel_success = False
 
-            st.download_button(
-                label="📥 Excelファイルでダウンロード",
-                data=excel_data,
-                file_name=f"roster_{year}_{month}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            if excel_success and excel_data is not None:
+                st.download_button(
+                    label="📥 Excelファイルでダウンロード",
+                    data=excel_data,
+                    file_name=f"roster_{year}_{month}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                # openpyxlの書き出しに失敗した場合や、ライブラリが無い場合は安全にCSV形式でフォールバック
+                st.warning("⚠️ Excelエクスポートの実行環境が制限されているため、標準のCSV形式でエクスポートします。")
+                st.download_button(
+                    label="📥 CSVファイルでダウンロード",
+                    data=res_df.to_csv().encode('utf-8-sig'),
+                    file_name=f"roster_{year}_{month}.csv",
+                    mime="text/csv"
+                )
         else: 
             st.error("解が見つかりませんでした。入力制約が競合していないか確認してください。")
