@@ -21,6 +21,42 @@ def format_minutes_to_hhmm(minutes):
     sign = "-" if is_negative else ""
     return f"{sign}{hh:02d}:{mm:02d}"
 
+# --- 【完全な解決策：コールバック駆動非破壊ステート保存関数】 ---
+# ユーザーが編集を終えた瞬間（Rerunが走る前）に、差分辞書を解析してセッション内のデータフレームを直接更新します。
+def store_df(key):
+    pkey = '_' + key
+    if pkey in st.session_state:
+        changes = st.session_state[pkey]
+        df = st.session_state[key]
+        
+        # 1. セルの編集（edited_rows）を正確にマッピングして適用
+        if "edited_rows" in changes:
+            for row_idx_str, col_changes in changes["edited_rows"].items():
+                row_idx = int(row_idx_str)
+                # 行番号から正しいインデックス（スタッフ名文字列、日付数値など）を自動取得
+                idx_val = df.index[row_idx]
+                for col_name, new_val in col_changes.items():
+                    df.at[idx_val, col_name] = new_val
+                    
+        # 2. 行追加があった場合の適用
+        if "added_rows" in changes and len(changes["added_rows"]) > 0:
+            for added_row in changes["added_rows"]:
+                new_idx = df.shape[0]
+                for col_name, val in added_row.items():
+                    df.at[new_idx, col_name] = val
+                    
+        # 3. 行削除があった場合の適用
+        if "deleted_rows" in changes and len(changes["deleted_rows"]) > 0:
+            df = df.drop(df.index[changes["deleted_rows"]]).reset_index(drop=True)
+            
+        # 更新された DataFrame を確実にセッションのマスターに保存
+        st.session_state[key] = df
+        
+        # saved_tablesにも完全にマッピング（JSONバックアップ出力用）
+        if "saved_tables" not in st.session_state.config:
+            st.session_state.config["saved_tables"] = {}
+        st.session_state.config["saved_tables"][key] = df.to_dict()
+
 # --- 1. グローバル設定：デザインとレイアウト ---
 st.set_page_config(page_title="AI勤務作成：V80 Ultra Optimizer", page_icon="🛡️", layout="wide")
 
@@ -52,7 +88,7 @@ with st.sidebar:
 
     st.divider()
     st.header("🎯 AI解析の優先戦略")
-    st.info("優先したい指標を高めることで、AIの思考パターンが動的に変化します。")
+    st.info("優先したい指標を高めることで、AI of 思考パターンが動的に変化します。")
     w_h_rule = st.slider("ルールの厳守度", 0, 100, 95)
     w_mixing = st.slider("早遅ミキシング（バランス）", 0, 100, 70)
     w_fair = st.slider("担当回数の公平性", 0, 100, 50)
@@ -144,7 +180,7 @@ current_state_key = (
 # 単なるセルの値変更によるRerunでは、データフレームを絶対に再作成せず、セッション内のデータを保持し続けます。
 if "last_state_key" not in st.session_state or st.session_state.last_state_key != current_state_key:
     form_names = list(staff_list)
-    # 【プルダウン復旧】 get_persisted_df の第3引数に選択肢カテゴリを漏れなく100%確実にパス
+    # 【不具合完全解消：Categories引数の漏れなき確実な再定義】
     st.session_state["skill"] = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list), ["○", "△", "×"])
     st.session_state["hols"] = get_persisted_df("hols", pd.DataFrame({"休の総数": [9] * len(staff_list), "公休分": [8] * len(staff_list)}, index=staff_list))
     st.session_state["trainee"] = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=[f"{s}_見習い回数" for s in s_list]))
@@ -160,7 +196,7 @@ if "last_state_key" not in st.session_state or st.session_state.last_state_key !
 # --- 3. UIの統合タブ構成 ---
 tab_st, tab_skl, tab_roster = st.tabs(["🏗️ 1. 組織と勤務の構成", "⚖️ 2. 公休・スキル・回数", "🧬 3. 勤務表の最適化"])
 
-# --- タブ1. 組織と勤務の構成（自動保存＆メモリバグ完全解消） ---
+# --- タブ1. 組織と勤務の構成（コールバック非破壊保存） ---
 with tab_st:
     c1, c2 = st.columns(2)
     with c1:
@@ -169,9 +205,8 @@ with tab_st:
         form_n_reg = st.number_input("一般職数", 1, 20, n_reg)
         form_total = int(form_n_mgr + form_n_reg)
         
-        # セッション変数（"names"）とエディタの key（"names_ed"）を別名に分離する設計
-        st.session_state["names"] = st.data_editor(st.session_state["names"], use_container_width=True, key="names_ed")
-        st.session_state.config["saved_tables"]["names"] = st.session_state["names"].to_dict()
+        # スタッフ名変更も上書きを廃止し、コールバックだけで安全に同期
+        st.data_editor(st.session_state["names"], use_container_width=True, key="_names", on_change=store_df, args=["names"])
     with c2:
         st.subheader("📋 シフト構成")
         form_raw_s = st.text_input("勤務略称 (,) 区切り", raw_s)
@@ -182,9 +217,8 @@ with tab_st:
     st.subheader("⏱️ 各担務の超過時間設定")
     st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
     
-    # セッション変数（"overtime"）とエディタの key（"overtime_ed"）を別名に分離する設計
-    st.session_state["overtime"] = st.data_editor(st.session_state["overtime"], use_container_width=True, key="overtime_ed")
-    st.session_state.config["saved_tables"]["overtime"] = st.session_state["overtime"].to_dict()
+    # 循環上書き代入（=st.data_editor）を完全に廃止し、on_change コールバックのみでステート管理
+    st.data_editor(st.session_state["overtime"], use_container_width=True, key="_overtime", on_change=store_df, args=["overtime"])
 
     # パラメータの同期
     new_staff_list = st.session_state["names"]["スタッフ名"].tolist()
@@ -197,12 +231,12 @@ with tab_st:
         "late_shifts": form_late_gr
     })
 
-# --- タブ2. 公休・スキル（自動保存＆メモリバグ完全解消） ---
+# --- タブ2. 公休・スキル（コールバック非破壊保存） ---
 with tab_skl:
     st.subheader("🎓 専門スキル・月間公休数・教育ノルマ")
     st.write("○:可能, △:見習い（ベテラン必須）, ×:不可")
     
-    # 【二重安全対策】 column_config を明示的に指定してプルダウン（Selectbox）としてレンダリングを100%完全固定
+    # 【二重安全対策】 column_config を明示的に指定してセレクトボックスとしてレンダリングを完全に固定
     column_config_skill = {
         col: st.column_config.SelectboxColumn(
             col,
@@ -211,25 +245,24 @@ with tab_skl:
         )
         for col in s_list
     }
-    st.session_state["skill"] = st.data_editor(
+    st.data_editor(
         st.session_state["skill"], 
         column_config=column_config_skill,
         use_container_width=True, 
-        key="skill_ed"
+        key="_skill", 
+        on_change=store_df, 
+        args=["skill"]
     )
-    st.session_state.config["saved_tables"]["skill"] = st.session_state["skill"].to_dict()
     
     col_c1, col_c2 = st.columns(2)
     with col_c1:
         st.subheader("📅 月間休日数設定")
-        st.session_state["hols"] = st.data_editor(st.session_state["hols"], use_container_width=True, key="hols_ed")
-        st.session_state.config["saved_tables"]["hols"] = st.session_state["hols"].to_dict()
+        st.data_editor(st.session_state["hols"], use_container_width=True, key="_hols", on_change=store_df, args=["hols"])
     with col_c2:
         st.subheader("🏫 教育ノルマ設定")
-        st.session_state["trainee"] = st.data_editor(st.session_state["trainee"], use_container_width=True, key="trainee_ed")
-        st.session_state.config["saved_tables"]["trainee"] = st.session_state["trainee"].to_dict()
+        st.data_editor(st.session_state["trainee"], use_container_width=True, key="_trainee", on_change=store_df, args=["trainee"])
 
-# --- タブ3. 勤務表の最適化（自動保存＆メモリバグ完全解消） ---
+# --- タブ3. 勤務表の最適化（申し込み・コールバック非破壊保存・AI実行） ---
 with tab_roster:
     st.subheader("📝 前月末引継ぎ & 今月の申し込み (※「休」は年次休暇として集計します)")
     
@@ -253,33 +286,33 @@ with tab_roster:
 
     c_p, c_r = st.columns([1, 3])
     with c_p: 
-        st.session_state["prev"] = st.data_editor(
+        st.data_editor(
             st.session_state["prev"], 
             column_config=column_config_prev,
             use_container_width=True, 
-            key="prev_ed"
+            key="_prev", 
+            on_change=store_df, 
+            args=["prev"]
         )
-        st.session_state.config["saved_tables"]["prev"] = st.session_state["prev"].to_dict()
     with c_r: 
-        st.session_state["request"] = st.data_editor(
+        st.data_editor(
             st.session_state["request"], 
             column_config=column_config_request,
             use_container_width=True, 
-            key="request_ed"
+            key="_request", 
+            on_change=store_df, 
+            args=["request"]
         )
-        st.session_state.config["saved_tables"]["request"] = st.session_state["request"].to_dict()
 
     # 不要担務と指定日設定
     c_ex, c_des = st.columns([1, 1])
     with c_ex:
         st.subheader("🚫 不要担務 (祝日Cなど)")
-        st.session_state["exclude"] = st.data_editor(st.session_state["exclude"], use_container_width=True, key="exclude_ed")
-        st.session_state.config["saved_tables"]["exclude"] = st.session_state["exclude"].to_dict()
+        st.data_editor(st.session_state["exclude"], use_container_width=True, key="_exclude", on_change=store_df, args=["exclude"])
     with c_des:
         st.subheader("📌 指定日設定")
         st.write("※ここでチェックを入れた日は「指定日」となり、A・B勤務の超過分が自動的に「0分」になります。")
-        st.session_state["designated"] = st.data_editor(st.session_state["designated"], use_container_width=True, key="designated_ed")
-        st.session_state.config["saved_tables"]["designated"] = st.session_state["designated"].to_dict()
+        st.data_editor(st.session_state["designated"], use_container_width=True, key="_designated", on_change=store_df, args=["designated"])
 
     # --- 最適化インプットデータの最新同期取得 ---
     opt_skill = st.session_state["skill"]
@@ -334,14 +367,6 @@ with tab_roster:
         L_IDS = [s_list_extended.index(x) + 1 for x in late_gr if x in s_list_extended]
         
         w_rhythm = w_mixing
-
-        # 日本の祝日判定用データの取得
-        jp_holidays = {}
-        if holidays is not None:
-            try:
-                jp_holidays = holidays.Japan(years=[year])
-            except Exception:
-                pass
 
         # Fシフト用スキル判定関数
         def get_skill_for_F(s_idx):
