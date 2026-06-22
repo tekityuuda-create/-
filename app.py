@@ -121,6 +121,14 @@ with st.sidebar:
         f"v80_backup_{year}_{month}.json"
     )
 
+# --- 日本の祝日判定用データの取得（NameError回避のためグローバルスコープへ移動） ---
+jp_holidays = {}
+if holidays is not None:
+    try:
+        jp_holidays = holidays.Japan(years=[year])
+    except Exception:
+        pass
+
 # 現在の有効な設定パラメータを読み込み
 n_mgr = st.session_state.config["num_mgr"]
 n_reg = st.session_state.config["num_regular"]
@@ -314,7 +322,7 @@ with tab_roster:
         for col in days_cols
     }
 
-    # 【レイアウトの上下配置への更新】
+    # 左右の分割を廃止し、上下に再配置。横幅をフルに使ってスライドを不要にしました
     st.subheader("🗓️ 前月末引継ぎ")
     st.data_editor(
         st.session_state["prev"], 
@@ -534,7 +542,7 @@ with tab_roster:
                         skill_val = opt_skill.iloc[s, i]
                     if skill_val == "×": model.Add(x[s, d, i+1] == 0)
 
-                # 申し込み（希望）の反映（絶対に崩さない最強 of ハード制約）
+                # 申し込み（希望）の反映（絶対に崩さない最強のハード制約）
                 # 希望休の「休」は S_NEN（年次休暇）に強制マッピング
                 req = opt_req.iloc[s, d]
                 c_map = {"休": S_NEN, "日": S_NIK, "": -1}
@@ -670,14 +678,6 @@ with tab_roster:
             for i, n in enumerate(s_list_extended): id_char[i+1] = n
             for si in range(total):
                 res_rows.append([id_char[next(j for j in range(num_types_extended+4) if slv.Value(x[si, di, j])==1)] for di in range(n_days)])
-
-            # 日本の祝日判定用データの読み込み
-            jp_holidays = {}
-            if holidays is not None:
-                try:
-                    jp_holidays = holidays.Japan(years=[year])
-                except Exception:
-                    pass
 
             # --- 各人の超過勤務時間、年次休暇、調整休日、差し引きの算出 ---
             total_overtimes = []
