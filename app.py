@@ -24,7 +24,6 @@ def format_minutes_to_hhmm(minutes):
 
 # --- 【完全な解決策：コールバック駆動非破壊ステート保存関数】 ---
 # ユーザーが編集を終えた瞬間（Rerunが走る前）に、差分辞書を解析してセッション内のデータフレームを直接更新します。
-# 万が一のPandas内部の型競合でも絶対にエラーで落ちないよう、try-exceptを徹底して配置しています。
 def store_df(key):
     pkey = '_' + key
     if pkey in st.session_state:
@@ -87,15 +86,20 @@ with st.sidebar:
     st.header("📂 設定データの完全同期")
     up_file = st.file_uploader("設定ファイルを読み込む", type="json")
     if up_file:
-        try:
-            st.session_state.config.update(json.load(up_file))
-            # アップロード成功時は、セッション内の DataFrame の強制再構築を行うためにキーを初期化
-            if "last_state_key" in st.session_state:
-                del st.session_state.last_state_key
-            st.success("全ての変数の整合性を確認し復元しました。")
-            st.rerun()
-        except Exception:
-            st.error("エラー：ファイルの構造が不正です。")
+        file_id = f"{up_file.name}_{up_file.size}"
+        # 【無限リロードバグの完全解消ガード】セッション内に過去の処理済みファイルIDがあるか確認
+        if "last_loaded_file" not in st.session_state or st.session_state.last_loaded_file != file_id:
+            try:
+                st.session_state.config.update(json.load(up_file))
+                # アップロード成功時は、セッション内の DataFrame の強制再構築を行うためにキーを初期化
+                if "last_state_key" in st.session_state:
+                    del st.session_state.last_state_key
+                # 処理済みファイルIDをセッションに格納して二重Rerunを完全に遮断
+                st.session_state.last_loaded_file = file_id
+                st.success("全ての変数の整合性を確認し復元しました。")
+                st.rerun()
+            except Exception:
+                st.error("エラー：ファイルの構造が不正です。")
 
     st.divider()
     st.header("🎯 AI解析の優先戦略")
@@ -110,7 +114,7 @@ with st.sidebar:
     month = int(st.number_input("月", 1, 12, st.session_state.config["month"]))
 
     st.divider()
-    # ダウンロードボタンをサイドバーに固定し、どのタブにいても常に現在の全設定を1クリックで保存
+    # ダウンロード保存ボタンをサイドバーに固定
     st.download_button(
         "📥 現在の全設定を保存する", 
         json.dumps(st.session_state.config, ensure_ascii=False), 
@@ -132,7 +136,7 @@ s_list = [s.strip() for s in raw_s.split(",") if s.strip()]
 early_gr = [x for x in s_list if x in st.session_state.config["early_shifts"]]
 late_gr = [x for x in s_list if x in st.session_state.config["late_shifts"]]
 
-# --- データの整合性を完全に保つための高精度復元関数（行番号位置による安全引き継ぎ＆例外徹底回避設計） ---
+# --- データの整合性を完全に保つための高精度復元関数（曜日・型ズレの吸収・例外回避設計） ---
 def get_persisted_df(key, d_df, categories=None):
     tables = st.session_state.config.get("saved_tables", {})
     if key in tables:
@@ -192,7 +196,6 @@ options = ["", "休", "日"] + s_list
 p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
 
 # --- 【重要】ステート同期・DataFrame完全永続化＆セルフヒーリングシステム ---
-# 現在の基本設定パラメーターのハッシュ（キー）を生成
 current_state_key = (
     tuple(staff_list),
     tuple(days_cols),
@@ -311,7 +314,7 @@ with tab_roster:
         for col in days_cols
     }
 
-    # 左右の分割を廃止し、上下に再配置。横幅をフルに使ってスライドを不要にしました
+    # 【レイアウトの上下配置への更新】
     st.subheader("🗓️ 前月末引継ぎ")
     st.data_editor(
         st.session_state["prev"], 
@@ -531,7 +534,7 @@ with tab_roster:
                         skill_val = opt_skill.iloc[s, i]
                     if skill_val == "×": model.Add(x[s, d, i+1] == 0)
 
-                # 申し込み（希望）の反映（絶対に崩さない最強のハード制約）
+                # 申し込み（希望）の反映（絶対に崩さない最強 of ハード制約）
                 # 希望休の「休」は S_NEN（年次休暇）に強制マッピング
                 req = opt_req.iloc[s, d]
                 c_map = {"休": S_NEN, "日": S_NIK, "": -1}
