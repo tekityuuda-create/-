@@ -103,7 +103,7 @@ with st.sidebar:
     month = int(st.number_input("月", 1, 12, st.session_state.config["month"]))
 
     st.divider()
-    # 【不具合完全解消】ダウンロードボタンをサイドバーに固定し、どのタブにいても常に現在の全設定を1クリックで保存できるように設計
+    # ダウンロードボタンをサイドバーに固定し、どのタブにいても常に現在の全設定を1クリックで保存
     st.download_button(
         "📥 現在の全設定を保存する", 
         json.dumps(st.session_state.config, ensure_ascii=False), 
@@ -277,8 +277,6 @@ with tab_skl:
 
 # --- タブ3. 勤務表の最適化（自動保存＆メモリバグ完全解消） ---
 with tab_roster:
-    st.subheader("📝 前月末引継ぎ & 今月の申し込み (※「休」は年次休暇として集計します)")
-    
     # 選択肢設定を column_config を用いてセレクトボックスとして強制固定
     column_config_prev = {
         col: st.column_config.SelectboxColumn(
@@ -297,27 +295,31 @@ with tab_roster:
         for col in days_cols
     }
 
-    c_p, c_r = st.columns([1, 3])
-    with c_p: 
-        st.data_editor(
-            st.session_state["prev"], 
-            column_config=column_config_prev,
-            use_container_width=True, 
-            key="_prev", 
-            on_change=store_df, 
-            args=["prev"]
-        )
-    with c_r: 
-        st.data_editor(
-            st.session_state["request"], 
-            column_config=column_config_request,
-            use_container_width=True, 
-            key="_request", 
-            on_change=store_df, 
-            args=["request"]
-        )
+    # 【レイアウトの大幅改善】左右並び（st.columns）を廃止し、上下並び（縦方向スタック）に再配置
+    # これにより横幅がフルに活用され、スライド（横スクロール）を極限まで抑えて快適に入力・閲覧可能になります
+    st.subheader("🗓️ 前月末引継ぎ")
+    st.data_editor(
+        st.session_state["prev"], 
+        column_config=column_config_prev,
+        use_container_width=True, 
+        key="_prev", 
+        on_change=store_df, 
+        args=["prev"]
+    )
+    
+    st.subheader("📝 今月の申し込み (※「休」は年次休暇として集計します)")
+    st.data_editor(
+        st.session_state["request"], 
+        column_config=column_config_request,
+        use_container_width=True, 
+        key="_request", 
+        on_change=store_df, 
+        args=["request"]
+    )
 
-    # 不要担務と指定日設定
+    st.divider()
+
+    # 不要担務と指定日設定（こちらは横幅が狭いため、並行並びのままでスッキリ表示されます）
     c_ex, c_des = st.columns([1, 1])
     with c_ex:
         st.subheader("🚫 不要担務 (祝日Cなど)")
@@ -380,6 +382,14 @@ with tab_roster:
         L_IDS = [s_list_extended.index(x) + 1 for x in late_gr if x in s_list_extended]
         
         w_rhythm = w_mixing
+
+        # 日本の祝日判定用データの取得
+        jp_holidays = {}
+        if holidays is not None:
+            try:
+                jp_holidays = holidays.Japan(years=[year])
+            except Exception:
+                pass
 
         # Fシフト用スキル判定関数
         def get_skill_for_F(s_idx):
