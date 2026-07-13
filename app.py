@@ -267,10 +267,19 @@ if "last_state_key" not in st.session_state or st.session_state.last_state_key !
     
     st.session_state.last_state_key = current_state_key
 
-# --- 3. UIの統合タブ構成 ---
-tab_st, tab_skl, tab_roster = st.tabs(["🏗️ 1. 組織と勤務の構成", "⚖️ 2. 公休・スキル・回数", "🧬 3. 勤務表の最適化"])
+# --- 3. UIの統合タブ構成（【縦横スライド完全ゼロ】8つのタブへ再配置・細分化） ---
+tab_st, tab_ot, tab_skl, tab_hol, tab_prev, tab_req, tab_ex_des, tab_solve = st.tabs([
+    "🏗️ 1. 基本構成", 
+    "⏱️ 2. 超過時間設定",
+    "🎓 3. 専門スキル", 
+    "📅 4. 休日数設定", 
+    "🗓️ 5. 前月末引継ぎ", 
+    "📝 6. 今月の申し込み", 
+    "🚫 7. 不要担務・指定日", 
+    "🧬 8. AI勤務作成の実行"
+])
 
-# --- タブ1. 組織と勤務の構成（自動保存＆メモリバグ完全解消） ---
+# --- タブ1. 組織と勤務の構成 ---
 with tab_st:
     c1, c2 = st.columns(2)
     with c1:
@@ -286,7 +295,6 @@ with tab_st:
                 required=True
             )
         }
-        # スタッフ名変更も上書きを廃止し、コールバックだけで安全に同期
         st.data_editor(st.session_state["names"], column_config=column_config_names, use_container_width=True, key="_names", on_change=store_df, args=["names"])
     with c2:
         st.subheader("📋 シフト構成")
@@ -294,12 +302,6 @@ with tab_st:
         form_s_list = [s.strip() for s in form_raw_s.split(",") if s.strip()]
         form_early_gr = st.multiselect("早番グループ", form_s_list, default=[x for x in form_s_list if x in early_gr])
         form_late_gr = st.multiselect("遅番グループ", form_s_list, default=[x for x in form_s_list if x in late_gr])
-        
-    st.subheader("⏱️ 各担務の超過時間設定")
-    st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
-    
-    # 循環上書き代入を完全に廃止し、on_change コールバックのみでステート管理
-    st.data_editor(st.session_state["overtime"], use_container_width=True, key="_overtime", on_change=store_df, args=["overtime"])
 
     # パラメータの同期
     new_staff_list = st.session_state["names"]["スタッフ名"].tolist()
@@ -312,12 +314,15 @@ with tab_st:
         "late_shifts": form_late_gr
     })
 
-# --- タブ2. 公休・スキル（自動保存＆メモリバグ完全解消） ---
+# --- タブ2. 担務の超過時間設定 ---
+with tab_ot:
+    st.subheader("⏱️ 各担務の超過時間設定")
+    st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
+    st.data_editor(st.session_state["overtime"], use_container_width=True, key="_overtime", on_change=store_df, args=["overtime"])
+
+# --- タブ3. 専門スキル ＆ 教育同行設定 ---
 with tab_skl:
-    st.subheader("🎓 専門スキル・月間公休数・教育ノルマ")
-    st.write("○:可能, △:見習い（ベテラン必須）, ×:不可")
-    
-    # 【二重安全対策】 column_config を明示的に指定してセレクトボックスとしてレンダリングを完全に固定
+    st.subheader("🎓 専門スキル（○:可能, △:見習い, ×:不可）")
     column_config_skill = {
         col: st.column_config.SelectboxColumn(
             col,
@@ -335,18 +340,17 @@ with tab_skl:
         args=["skill"]
     )
     
-    col_c1, col_c2 = st.columns(2)
-    with col_c1:
-        st.subheader("📅 月間休日数設定")
-        st.data_editor(st.session_state["hols"], use_container_width=True, key="_hols", on_change=store_df, args=["hols"])
-    with col_c2:
-        st.subheader("🏫 教育ノルマ設定")
-        st.data_editor(st.session_state["trainee"], use_container_width=True, key="_trainee", on_change=store_df, args=["trainee"])
+    st.subheader("🏫 教育ノルマ（見習い担当回数の上限）")
+    st.data_editor(st.session_state["trainee"], use_container_width=True, key="_trainee", on_change=store_df, args=["trainee"])
 
-# --- タブ3. 勤務表の最適化（自動保存＆メモリバグ完全解消・上下転置レイアウト） ---
-with tab_roster:
-    # 【横スライド完全排除】列側の設定を日付ではなく「スタッフ名（staff_list）」に切り替え
-    # これにより、列数は最大10列前後に固定されるため、横スクロール（スライド）は完全に不要になります。
+# --- タブ4. 月間休日数設定 ---
+with tab_hol:
+    st.subheader("📅 月間休日数設定")
+    st.data_editor(st.session_state["hols"], use_container_width=True, key="_hols", on_change=store_df, args=["hols"])
+
+# --- タブ5. 前月末引継ぎ ---
+with tab_prev:
+    st.subheader("🗓️ 前月末引継ぎ")
     column_config_prev = {
         col: st.column_config.SelectboxColumn(
             col,
@@ -355,17 +359,6 @@ with tab_roster:
         )
         for col in staff_list
     }
-    column_config_request = {
-        col: st.column_config.SelectboxColumn(
-            col,
-            options=options,
-            required=False
-        )
-        for col in staff_list
-    }
-
-    # 上下の縦並び配置（スクロール不要）
-    st.subheader("🗓️ 前月末引継ぎ")
     st.data_editor(
         st.session_state["prev"], 
         column_config=column_config_prev,
@@ -374,8 +367,18 @@ with tab_roster:
         on_change=store_df, 
         args=["prev"]
     )
-    
+
+# --- タブ6. 今月の申し込み ---
+with tab_req:
     st.subheader("📝 今月の申し込み (※「休」は年次休暇として集計します)")
+    column_config_request = {
+        col: st.column_config.SelectboxColumn(
+            col,
+            options=options,
+            required=False
+        )
+        for col in staff_list
+    }
     st.data_editor(
         st.session_state["request"], 
         column_config=column_config_request,
@@ -385,27 +388,28 @@ with tab_roster:
         args=["request"]
     )
 
-    st.divider()
+# --- タブ7. 不要担務・指定日設定（左右配置で縦の高さを半分に抑え、スクロールを完全排除） ---
+with tab_ex_des:
+    c_ex, c_des = st.columns([1, 1])
+    with c_ex:
+        st.subheader("🚫 不要担務 (祝日Cなど)")
+        st.data_editor(st.session_state["exclude"], use_container_width=True, key="_exclude", on_change=store_df, args=["exclude"])
+    with c_des:
+        st.subheader("📌 指定日設定")
+        st.write("※ここでチェックを入れた日は「指定日」となり、A・B勤務の超過分が自動的に「0分」になります。")
+        st.data_editor(st.session_state["designated"], use_container_width=True, key="_designated", on_change=store_df, args=["designated"])
 
-    # 不要担務と指定日設定（上下並びにして画面を100%広く使い、スクロールを排除）
-    st.subheader("🚫 不要担務 (祝日Cなど)")
-    st.data_editor(st.session_state["exclude"], use_container_width=True, key="_exclude", on_change=store_df, args=["exclude"])
-    
-    st.subheader("📌 指定日設定")
-    st.write("※ここでチェックを入れた日は「指定日」となり、A・B勤務の超過分が自動的に「0分」になります。")
-    st.data_editor(st.session_state["designated"], use_container_width=True, key="_designated", on_change=store_df, args=["designated"])
+# --- 最適化インプットデータの最新同期取得 ---
+opt_skill = st.session_state["skill"]
+opt_hols = st.session_state["hols"]
+opt_prev = st.session_state["prev"]
+opt_req = st.session_state["request"]
+opt_ex = st.session_state["exclude"]
+opt_overtime = st.session_state["overtime"]
+opt_des = st.session_state["designated"]
 
-    # --- 最適化インプットデータの最新同期取得 ---
-    opt_skill = st.session_state["skill"]
-    opt_hols = st.session_state["hols"]
-    opt_prev = st.session_state["prev"]
-    opt_req = st.session_state["request"]
-    opt_ex = st.session_state["exclude"]
-    opt_overtime = st.session_state["overtime"]
-    opt_des = st.session_state["designated"]
-
-    # --- データの同期確認テーブル ---
-    st.divider()
+# --- タブ8. AI勤務表作成の実行 ---
+with tab_solve:
     st.write("🔍 **AIが今回読み込んだ各スタッフの公休と年次休暇の最終データ（自動同期検証用）**")
     debug_rows = []
     for s_idx, s_name in enumerate(staff_list):
@@ -777,7 +781,7 @@ with tab_roster:
         status = slv.Solve(model)
 
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("✨ 勤務表作成エンジンが終了しました。")
+            st.success("✨ 勤務表の自動作成が完了いたしました。管理者から新人への階層並び替え、組み合わせ制限、教育同行ルール、公休、超過勤務が精密に反映されています。")
             res_rows = []
             id_char = {S_OFF: "休", S_NIK: "日", S_CHO: "調", S_NEN: "年"} # 年を追加
             for i, n in enumerate(s_list_extended): id_char[i+1] = n
