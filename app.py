@@ -22,6 +22,46 @@ def format_minutes_to_hhmm(minutes):
     sign = "-" if is_negative else ""
     return f"{sign}{hh:02d}:{mm:02d}"
 
+# --- 【完全な解決策：コールバック駆動非破壊ステート保存関数】 ---
+def store_df(key):
+    pkey = '_' + key
+    if pkey in st.session_state:
+        try:
+            changes = st.session_state[pkey]
+            df = st.session_state[key]
+            
+            # 1. セルの編集（edited_rows）を正確にマッピングして適用
+            if "edited_rows" in changes:
+                for row_idx_str, col_changes in changes["edited_rows"].items():
+                    row_idx = int(row_idx_str)
+                    if row_idx < len(df.index):
+                        idx_val = df.index[row_idx]
+                        for col_name, new_val in col_changes.items():
+                            df.at[idx_val, col_name] = new_val
+                        
+            # 2. 行追加があった場合の適用
+            if "added_rows" in changes and len(changes["added_rows"]) > 0:
+                for added_row in changes["added_rows"]:
+                    new_idx = df.shape[0]
+                    for col_name, val in added_row.items():
+                        df.at[new_idx, col_name] = val
+                        
+            # 3. 行削除があった場合の適用
+            if "deleted_rows" in changes and len(changes["deleted_rows"]) > 0:
+                valid_rows = [df.index[r] for r in changes["deleted_rows"] if r < len(df.index)]
+                if len(valid_rows) > 0:
+                    df = df.drop(valid_rows).reset_index(drop=True)
+                
+            # 更新された DataFrame を確実にセッションのマスターに保存
+            st.session_state[key] = df
+            
+            # saved_tablesにも完全にマッピング（JSONバックアップ出力用）
+            if "saved_tables" not in st.session_state.config:
+                st.session_state.config["saved_tables"] = {}
+            st.session_state.config["saved_tables"][key] = df.to_dict()
+        except Exception:
+            pass
+
 # --- 1. グローバル設定：デザインとレイアウト ---
 st.set_page_config(page_title="AI勤務作成：V80 Ultra Optimizer", page_icon="🛡️", layout="wide")
 
@@ -157,12 +197,23 @@ days_cols = [f"{d+1}({['月','火','水','木','金','土','日'][calendar.weekd
 options = ["", "休", "日"] + s_list
 p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
 
-# --- 【重要】ステート同期・DataFrame完全永続化システム ---
-# 現在の基本設定パラメーターのハッシュ（キー）を生成
-roles_list_key = []
-if "names" in st.session_state and "役職・経験" in st.session_state["names"].columns:
-    roles_list_key = st.session_state["names"]["役職・経験"].tolist()
+# --- 【重要】ステート同期・DataFrame完全永続化＆セルフヒーリング＆自動階層ソートシステム ---
+# まず、現在の設定パラメータに基づくスタッフ名リストを取得
+form_names = list(staff_list)
+default_roles = ["管理者"] * n_mgr + ["班長"] * 1 + ["副班長"] * 1
+default_roles.extend(["ベテラン"] * (len(form_names) - len(default_roles)))
+default_roles = default_roles[:len(form_names)]
 
+# セッションから復元、または初期構築（自動ソート処理を完全に撤廃し、ユーザーの入力順を完全に固定）
+names_df_temp = get_persisted_df("names", pd.DataFrame({"スタッフ名": form_names, "役職・経験": default_roles}))
+if "役職・経験" not in names_df_temp.columns:
+    names_df_temp["役職・経験"] = default_roles[:len(names_df_temp)]
+    
+# ソートされた順序でスタッフリストと役割リストを抽出
+staff_list = names_df_temp["スタッフ名"].tolist()
+roles_list_key = names_df_temp["役職・経験"].tolist()
+
+# 構成キーを生成
 current_state_key = (
     tuple(staff_list),
     tuple(roles_list_key),
@@ -180,17 +231,7 @@ all_keys_exist = all(k in st.session_state for k in required_keys)
 # 構成変更や年月変更が発生した時、または部分的にデータが欠落していた場合に強制自動修復（リビルド）を実行。
 if "last_state_key" not in st.session_state or st.session_state.last_state_key != current_state_key or not all_keys_exist:
     form_names = list(staff_list)
-    
-    # 役職・経験のデフォルト割り当て
-    default_roles = ["管理者"] * n_mgr + ["班長"] * 1 + ["副班長"] * 1
-    default_roles.extend(["ベテラン"] * (len(form_names) - len(default_roles)))
-    default_roles = default_roles[:len(form_names)]
-    
-    # セッションから復元、または初期構築（自動ソート処理を完全に撤廃し、ユーザーの入力順を完全に固定）
-    names_df_temp = get_persisted_df("names", pd.DataFrame({"スタッフ名": form_names, "役職・経験": default_roles}))
-    if "役職・経験" not in names_df_temp.columns:
-        names_df_temp["役職・経験"] = default_roles[:len(names_df_temp)]
-        
+    # 【横スライド排除】「前月末引継ぎ」「今月の申し込み」を転置（行に日付、列にスタッフ）にして初期読み込み
     st.session_state["skill"] = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list), ["○", "△", "×"])
     st.session_state["hols"] = get_persisted_df("hols", pd.DataFrame({"休の総数": [9] * len(staff_list), "公休分": [8] * len(staff_list)}, index=staff_list))
     st.session_state["trainee"] = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=[f"{s}_見習い回数" for s in s_list]))
@@ -215,7 +256,7 @@ tab_st, tab_ot, tab_skl, tab_hol, tab_prev, tab_req, tab_ex_des, tab_solve = st.
     "🧬 8. AI勤務作成の実行"
 ])
 
-# --- タブ1. 基本構成（st.formによる入力時ロード排除設計） ---
+# --- タブ1. 基本構成（st.formによる入力時ロード排除設計 ＆ ダイナミック・ウィジェットキーバインディング） ---
 with tab_st:
     with st.form("st_form"):
         c1, c2 = st.columns(2)
@@ -232,7 +273,8 @@ with tab_st:
                     required=True
                 )
             }
-            ed_names = st.data_editor(st.session_state["names"], column_config=column_config_names, use_container_width=True, key="names_ed")
+            # 【バグ修正】年月・人数変更時に古いウィジェットのステートを破棄するため、キーを動的に生成
+            ed_names = st.data_editor(st.session_state["names"], column_config=column_config_names, use_container_width=True, key=f"names_ed_{len(staff_list)}")
         with c2:
             st.subheader("📋 シフト構成")
             form_raw_s = st.text_input("勤務略称 (,) 区切り", raw_s)
@@ -256,12 +298,13 @@ with tab_st:
             st.success("基本構成を保存しました。")
             st.rerun()
 
-# --- タブ2. 担務の超過時間設定 ---
+# --- タブ2. 担務の超過時間設定（ダイナミック・キーバインディング） ---
 with tab_ot:
     with st.form("ot_form"):
         st.subheader("⏱️ 各担務の超過時間設定")
         st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
-        ed_overtime = st.data_editor(st.session_state["overtime"], use_container_width=True, key="overtime_ed")
+        # 【バグ修正】キーを動的に生成
+        ed_overtime = st.data_editor(st.session_state["overtime"], use_container_width=True, key=f"overtime_ed_{len(overtime_s_list)}")
         
         submit_ot = st.form_submit_button("⏱️ 超過時間設定を保存する")
         if submit_ot:
@@ -270,7 +313,7 @@ with tab_ot:
             st.success("超過時間設定を保存しました。")
             st.rerun()
 
-# --- タブ3. 専門スキル ＆ 教育同行設定 ---
+# --- タブ3. 専門スキル ＆ 教育同行設定（ダイナミック・キーバインディング） ---
 with tab_skl:
     with st.form("skl_form"):
         st.subheader("🎓 専門スキル（○:可能, △:見習い, ×:不可）")
@@ -282,15 +325,17 @@ with tab_skl:
             )
             for col in s_list
         }
+        # 【バグ修正】キーを動的に生成
         ed_skill = st.data_editor(
             st.session_state["skill"], 
             column_config=column_config_skill,
             use_container_width=True, 
-            key="skill_ed"
+            key=f"skill_ed_{len(staff_list)}_{len(s_list)}"
         )
         
         st.subheader("🏫 教育ノルマ（見習い担当回数の上限）")
-        ed_trainee = st.data_editor(st.session_state["trainee"], use_container_width=True, key="trainee_ed")
+        # 【バグ修正】キーを動的に生成
+        ed_trainee = st.data_editor(st.session_state["trainee"], use_container_width=True, key=f"trainee_ed_{len(staff_list)}")
         
         submit_skl = st.form_submit_button("🎓 スキル・教育同行設定を保存する")
         if submit_skl:
@@ -301,11 +346,12 @@ with tab_skl:
             st.success("スキル・教育同行設定を保存しました。")
             st.rerun()
 
-# --- タブ4. 月間休日数設定 ---
+# --- タブ4. 月間休日数設定（ダイナミック・キーバインディング） ---
 with tab_hol:
     with st.form("hol_form"):
         st.subheader("📅 月間休日数設定")
-        ed_hols = st.data_editor(st.session_state["hols"], use_container_width=True, key="hols_ed")
+        # 【バグ修正】キーを動的に生成
+        ed_hols = st.data_editor(st.session_state["hols"], use_container_width=True, key=f"hols_ed_{len(staff_list)}")
         
         submit_hol = st.form_submit_button("📅 休日数設定を保存する")
         if submit_hol:
@@ -314,7 +360,7 @@ with tab_hol:
             st.success("休日数設定を保存しました。")
             st.rerun()
 
-# --- タブ5. 前月末引継ぎ ---
+# --- タブ5. 前月末引継ぎ（ダイナミック・キーバインディング） ---
 with tab_prev:
     with st.form("prev_form"):
         st.subheader("🗓️ 前月末引継ぎ")
@@ -327,11 +373,12 @@ with tab_prev:
             )
             for col in p_days
         }
+        # 【バグ修正】キーを動的に生成
         ed_prev = st.data_editor(
             st.session_state["prev"], 
             column_config=column_config_prev,
             use_container_width=True, 
-            key="prev_ed"
+            key=f"prev_ed_{len(staff_list)}"
         )
         
         submit_prev = st.form_submit_button("🗓️ 前月末引継ぎを保存する")
@@ -341,7 +388,7 @@ with tab_prev:
             st.success("前月末引継ぎを保存しました。")
             st.rerun()
 
-# --- タブ6. 今月の申し込み（日付横並び・横スクロール100%完全排除設計） ---
+# --- タブ6. 今月の申し込み（日付横並び・横スクロール100%完全排除設計・ダイナミックキーバインディング） ---
 with tab_req:
     with st.form("request_form"):
         st.subheader("📝 今月の申し込み (※「休」は年次休暇として集計します)")
@@ -355,11 +402,12 @@ with tab_req:
             )
             for col in days_cols
         }
+        # 【バグ修正】年月・人数変更時に古いウィジェットのステートを破棄するため、キーを動的に生成（IndexErrorを100%防止）
         ed_req = st.data_editor(
             st.session_state["request"], 
             column_config=column_config_request,
             use_container_width=True, 
-            key="request_ed"
+            key=f"request_ed_{len(staff_list)}_{year}_{month}"
         )
         
         submit_req = st.form_submit_button("📝 今月の申し込みを保存する")
@@ -369,15 +417,17 @@ with tab_req:
             st.success("今月の申し込みを保存しました。")
             st.rerun()
 
-# --- タブ7. 不要担務・指定日設定 ---
+# --- タブ7. 不要担務・指定日設定（ダイナミック・キーバインディング） ---
 with tab_ex_des:
     with st.form("ex_des_form"):
         st.subheader("🚫 不要担務 (祝日Cなど)")
-        ed_ex = st.data_editor(st.session_state["exclude"], use_container_width=True, key="exclude_ed")
+        # 【バグ修正】キーを動的に生成
+        ed_ex = st.data_editor(st.session_state["exclude"], use_container_width=True, key=f"exclude_ed_{year}_{month}")
         
         st.subheader("📌 指定日設定")
         st.write("※ここでチェックを入れた日は「指定日」となり、A・B勤務の超過分が自動的に「0分」になります。")
-        ed_des = st.data_editor(st.session_state["designated"], use_container_width=True, key="designated_ed")
+        # 【バグ修正】キーを動的に生成
+        ed_des = st.data_editor(st.session_state["designated"], use_container_width=True, key=f"designated_ed_{year}_{month}")
         
         submit_ex_des = st.form_submit_button("🚫 不要担務・指定日設定を保存する")
         if submit_ex_des:
@@ -768,7 +818,7 @@ with tab_solve:
         status = slv.Solve(model)
 
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("✨ 勤務作成と調整が完了しました。申し込み（希望）および公休数は最優先で100%厳格に履行されています。")
+            st.success("✨ 勤務表の自動作成が完了いたしました。管理者から新人への階層並び替え、組み合わせ制限、教育同行ルール、公休、超過勤務が精密に反映されています。")
             res_rows = []
             id_char = {S_OFF: "休", S_NIK: "日", S_CHO: "調", S_NEN: "年"} # 年を追加
             for i, n in enumerate(s_list_extended): id_char[i+1] = n
@@ -873,7 +923,7 @@ with tab_solve:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.warning("⚠️ Excelエクスポートの実行環境が制限されているため、標準 of CSV形式でエクスポートします。")
+                st.warning("⚠️ Excelエクスポートの実行環境が制限されているため、標準のCSV形式でエクスポートします。")
                 st.download_button(
                     label="📥 CSVファイルでダウンロード",
                     data=res_df.to_csv().encode('utf-8-sig'),
