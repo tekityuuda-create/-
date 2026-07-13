@@ -4,9 +4,10 @@ import calendar
 import json
 import re
 import datetime
-import io  # Excel書き出し用のバイナリストリームモジュール
-import sys
-import subprocess
+import io
+import openpyxl
+import holidays
+from ortools.sat.python import cp_model
 
 # 【不具合安全対策：openpyxlの自動検出・動的インストール】
 # 動的インストールに失敗した場合は、エラーメッセージを一時非表示にしてソルバーの実行とCSV出力を優先します。
