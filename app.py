@@ -90,10 +90,6 @@ if 'config' not in st.session_state:
         "year": 2025, "month": 1, "saved_tables": {}
     }
 
-# データフレームのセッション永続化用ディクショナリの初期化
-if "dfs" not in st.session_state:
-    st.session_state.dfs = {}
-
 st.title("勤務作成エンジン (Team Excellence Pass)")
 st.info("💡 **リアルタイム自動保存機能搭載**: 画面の入力や変更はすべてリアルタイムで保存されます。入力した値が元に戻ることはありません。")
 
@@ -257,15 +253,17 @@ all_keys_exist = all(k in st.session_state for k in required_keys)
 
 # 構成変更や年月変更が発生した時、または部分的にデータが欠落していた場合に強制自動修復（リビルド）を実行。
 if "last_state_key" not in st.session_state or st.session_state.last_state_key != current_state_key or not all_keys_exist:
-    st.session_state["names"] = names_df_temp
+    form_names = list(staff_list)
+    # 【横スライド排除】「前月末引継ぎ」「今月の申し込み」を転置（行に日付、列にスタッフ）にして初期読み込み
     st.session_state["skill"] = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list), ["○", "△", "×"])
     st.session_state["hols"] = get_persisted_df("hols", pd.DataFrame({"休の総数": [9] * len(staff_list), "公休分": [8] * len(staff_list)}, index=staff_list))
     st.session_state["trainee"] = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=[f"{s}_見習い回数" for s in s_list]))
-    st.session_state["prev"] = get_persisted_df("prev", pd.DataFrame("休", index=staff_list, columns=p_days), ["日", "休", "早", "遅"])
-    st.session_state["request"] = get_persisted_df("request", pd.DataFrame("", index=staff_list, columns=days_cols), options)
+    st.session_state["prev"] = get_persisted_df("prev", pd.DataFrame("休", index=p_days, columns=staff_list), ["日", "休", "早", "遅"])
+    st.session_state["request"] = get_persisted_df("request", pd.DataFrame("", index=days_cols, columns=staff_list), options)
     st.session_state["exclude"] = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
     st.session_state["overtime"] = get_persisted_df("overtime", pd.DataFrame({"平日超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list], "土曜超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list]}, index=overtime_s_list))
     st.session_state["designated"] = get_persisted_df("designated", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=["指定日"]))
+    st.session_state["names"] = names_df_temp
     
     st.session_state.last_state_key = current_state_key
 
@@ -288,7 +286,7 @@ with tab_st:
                 required=True
             )
         }
-        # スタッフ名・役職変更も上書きを廃止し、セッション内で管理
+        # スタッフ名変更も上書きを廃止し、コールバックだけで安全に同期
         st.data_editor(st.session_state["names"], column_config=column_config_names, use_container_width=True, key="_names", on_change=store_df, args=["names"])
     with c2:
         st.subheader("📋 シフト構成")
@@ -300,6 +298,7 @@ with tab_st:
     st.subheader("⏱️ 各担務の超過時間設定")
     st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
     
+    # 循環上書き代入を完全に廃止し、on_change コールバックのみでステート管理
     st.data_editor(st.session_state["overtime"], use_container_width=True, key="_overtime", on_change=store_df, args=["overtime"])
 
     # パラメータの同期
@@ -318,6 +317,7 @@ with tab_skl:
     st.subheader("🎓 専門スキル・月間公休数・教育ノルマ")
     st.write("○:可能, △:見習い（ベテラン必須）, ×:不可")
     
+    # 【二重安全対策】 column_config を明示的に指定してセレクトボックスとしてレンダリングを完全に固定
     column_config_skill = {
         col: st.column_config.SelectboxColumn(
             col,
@@ -343,15 +343,17 @@ with tab_skl:
         st.subheader("🏫 教育ノルマ設定")
         st.data_editor(st.session_state["trainee"], use_container_width=True, key="_trainee", on_change=store_df, args=["trainee"])
 
-# --- タブ3. 勤務表の最適化（自動保存＆メモリバグ完全解消・上下レイアウト） ---
+# --- タブ3. 勤務表の最適化（自動保存＆メモリバグ完全解消・上下転置レイアウト） ---
 with tab_roster:
+    # 【横スライド完全排除】列側の設定を日付ではなく「スタッフ名（staff_list）」に切り替え
+    # これにより、列数は最大10列前後に固定されるため、横スクロール（スライド）は完全に不要になります。
     column_config_prev = {
         col: st.column_config.SelectboxColumn(
             col,
             options=["日", "休", "早", "遅"],
             required=True
         )
-        for col in p_days
+        for col in staff_list
     }
     column_config_request = {
         col: st.column_config.SelectboxColumn(
@@ -359,10 +361,10 @@ with tab_roster:
             options=options,
             required=False
         )
-        for col in days_cols
+        for col in staff_list
     }
 
-    # 上下の縦並び配置
+    # 上下の縦並び配置（スクロール不要）
     st.subheader("🗓️ 前月末引継ぎ")
     st.data_editor(
         st.session_state["prev"], 
@@ -385,15 +387,13 @@ with tab_roster:
 
     st.divider()
 
-    # 不要担務と指定日設定
-    c_ex, c_des = st.columns([1, 1])
-    with c_ex:
-        st.subheader("🚫 不要担務 (祝日Cなど)")
-        st.data_editor(st.session_state["exclude"], use_container_width=True, key="_exclude", on_change=store_df, args=["exclude"])
-    with c_des:
-        st.subheader("📌 指定日設定")
-        st.write("※ここでチェックを入れた日は「指定日」となり、A・B勤務の超過分が自動的に「0分」になります。")
-        st.data_editor(st.session_state["designated"], use_container_width=True, key="_designated", on_change=store_df, args=["designated"])
+    # 不要担務と指定日設定（上下並びにして画面を100%広く使い、スクロールを排除）
+    st.subheader("🚫 不要担務 (祝日Cなど)")
+    st.data_editor(st.session_state["exclude"], use_container_width=True, key="_exclude", on_change=store_df, args=["exclude"])
+    
+    st.subheader("📌 指定日設定")
+    st.write("※ここでチェックを入れた日は「指定日」となり、A・B勤務の超過分が自動的に「0分」になります。")
+    st.data_editor(st.session_state["designated"], use_container_width=True, key="_designated", on_change=store_df, args=["designated"])
 
     # --- 最適化インプットデータの最新同期取得 ---
     opt_skill = st.session_state["skill"]
@@ -409,7 +409,8 @@ with tab_roster:
     st.write("🔍 **AIが今回読み込んだ各スタッフの公休と年次休暇の最終データ（自動同期検証用）**")
     debug_rows = []
     for s_idx, s_name in enumerate(staff_list):
-        req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s_idx, di] == "休")
+        # 転置対応：opt_reqのアクセス順を行(日付)・列(スタッフ)に修正
+        req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[di, s_idx] == "休")
         total_h = int(opt_hols.iloc[s_idx, 0])  # 休の総数
         kokyu_h = int(opt_hols.iloc[s_idx, 1])  # 公休分
         debug_rows.append({
@@ -473,10 +474,10 @@ with tab_roster:
         x = {(s, d, i): model.NewBoolVar(f'x_{s}_{d}_{i}') for s in range(total) for d in range(n_days) for i in range(num_types_extended + 4)}
         score_objs = []
 
-        # 前月情報デコード
+        # 前月情報デコード（転置対応：opt_prevのアクセスを[日, スタッフ]に変更）
         for s in range(total):
             for di in range(4):
-                val = opt_prev.iloc[s, di]
+                val = opt_prev.iloc[di, s]
                 if di == 3 and val == "遅":
                     for ei in E_IDS: model.Add(x[s, 0, ei] == 0)
 
@@ -494,7 +495,8 @@ with tab_roster:
             for i, s_name in enumerate(s_list_extended):
                 sid = i + 1
                 
-                is_requested_by_someone = any(opt_req.iloc[s, d] == s_name for s in range(total))
+                # 転置対応：opt_reqのアクセスを[日, スタッフ]に変更
+                is_requested_by_someone = any(opt_req.iloc[d, s] == s_name for s in range(total))
                 
                 if s_name == "F":
                     is_excl = not (wd == 5 and has_C_and_D)
@@ -631,8 +633,10 @@ with tab_roster:
             daily_overtime_exprs = []
             
             for d in range(n_days):
+                # 休、調、年のいずれかが割り当てられている日を「休み」に統合
                 model.Add(is_off[d] == x[s, d, S_OFF] + x[s, d, S_CHO] + x[s, d, S_NEN])
 
+                # 判定用スイッチ変数の連動
                 model.Add(sum(x[s, d, i] for i in E_IDS) == 1).OnlyEnforceIf(is_early[d])
                 model.Add(sum(x[s, d, i] for i in E_IDS) == 0).OnlyEnforceIf(is_early[d].Not())
                 model.Add(sum(x[s, d, i] for i in L_IDS) == 1).OnlyEnforceIf(is_late[d])
@@ -646,12 +650,14 @@ with tab_roster:
                     if skill_val == "×": model.Add(x[s, d, i+1] == 0)
 
                 # 申し込み（希望）の反映（絶対に崩さない最強のハード制約）
-                req = opt_req.iloc[s, d]
+                # 希望休の「休」は S_NEN（年次休暇）に強制マッピング（転置対応：[d, s]から取得）
+                req = opt_req.iloc[d, s]
                 c_map = {"休": S_NEN, "日": S_NIK, "": -1}
                 for i, n in enumerate(s_list_extended): c_map[n] = i+1
                 if req in c_map and req != "": 
                     model.Add(x[s, d, c_map[req]] == 1)
                 
+                # 申し込み「休」ではない日は、S_NEN (年) が割り当てられないように制限する
                 if req != "休":
                     model.Add(x[s, d, S_NEN] == 0)
 
@@ -698,7 +704,7 @@ with tab_roster:
                 cum_cho_count = sum(x[s, k, S_CHO] for k in range(d + 1))
                 model.Add(cum_overtime >= cum_cho_count * 445)
 
-            # 「調」は土日への配置はバグ回避のため絶対に禁止
+            # 「調（調整休日）」は必ず平日にのみ配置（土日への配置はバグ回避のため絶対に禁止）
             for d in range(n_days):
                 wd_v = calendar.weekday(year, month, d+1)
                 if wd_v >= 5:  # 土曜日(5)または日曜日(6)
@@ -735,12 +741,12 @@ with tab_roster:
                         score_objs.append(m_w * 500000)
             else:
                 for di in range(n_days):
-                    if opt_req.iloc[s, di] != "日": 
+                    if opt_req.iloc[di, s] != "日":  # 転置対応：[di, s]
                         nik_var = x[s, di, S_NIK]
                         score_objs.append(nik_var * -10000000)
 
             # 各種休み日数の個別厳格配置（ハード制約）
-            req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s, di] == "休") # 希望年休数
+            req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[di, s] == "休") # 希望年休数（転置対応：[di, s]）
             total_off_limit = int(opt_hols.iloc[s, 0])  # 休の総数
             kokyu_val = int(opt_hols.iloc[s, 1])        # 公休分
             
@@ -750,8 +756,11 @@ with tab_roster:
                 target_cho_count = 0
             
             # 各休みの数を個別に等式で完全固定
+            # 年休（年）＝ 希望休数
             model.Add(sum(x[s, d, S_NEN] for d in range(n_days)) == req_off_count)
+            # 公休（休）＝ 設定公休分
             model.Add(sum(x[s, d, S_OFF] for d in range(n_days)) == kokyu_val)
+            # 調整休（調）＝ 調整休数
             model.Add(sum(x[s, d, S_CHO] for d in range(n_days)) == target_cho_count)
 
         # C. 担務平準化（公平性）
@@ -768,7 +777,7 @@ with tab_roster:
         status = slv.Solve(model)
 
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("✨ 勤務作成と調整が完了しました。申し込み（希望）および公休数は最優先で100%厳格に履行されています。")
+            st.success("✨ 勤務表作成エンジンが終了しました。")
             res_rows = []
             id_char = {S_OFF: "休", S_NIK: "日", S_CHO: "調", S_NEN: "年"} # 年を追加
             for i, n in enumerate(s_list_extended): id_char[i+1] = n
@@ -788,6 +797,8 @@ with tab_roster:
                     wd_v = calendar.weekday(year, month, di+1)
                     assigned_char = res_rows[si][di]
                     
+                    # 祝日・指定日判定
+                    d_date = datetime.date(year, month, di+1)
                     is_holiday = d_date in jp_holidays
                     is_designated = bool(opt_des.at[di+1, "指定日"]) if di+1 in opt_des.index else False
                     
@@ -850,7 +861,7 @@ with tab_roster:
                 
             st.dataframe(res_df.style.map(cl), use_container_width=True)
             
-            # --- 書式（色）付きExcelエクスポートに変更（環境制限によるフォールバック付き） ---
+            # --- 【不具合完全解消】CSVから書式（色）付きExcelエクスポートに変更 ---
             excel_success = False
             excel_data = None
             if openpyxl is not None:
