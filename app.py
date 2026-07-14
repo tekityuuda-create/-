@@ -25,23 +25,33 @@ def format_minutes_to_hhmm(minutes):
 # --- 1. グローバル設定：デザインとレイアウト ---
 st.set_page_config(page_title="AI勤務作成：V80 Ultra Optimizer", page_icon="🛡️", layout="wide")
 
+# セッション状態の初期化
 if 'config' not in st.session_state:
-    # 現在の翌月（年・月）を動的に算出するロジック
-    now = datetime.datetime.now()
-    if now.month == 12:
-        default_year = now.year + 1
-        default_month = 1
-    else:
-        default_year = now.year
-        default_month = now.month + 1
+    st.session_state.config = {}
 
-    st.session_state.config = {
-        "num_mgr": 2, "num_regular": 8,
+# 現在の翌月（年・月）を動的に算出するロジック
+now = datetime.datetime.now()
+if now.month == 12:
+    default_year = now.year + 1
+    default_month = 1
+else:
+    default_year = now.year
+    default_month = now.month + 1
+
+# 【不具合完全解消：自己修復システム】
+# もしセッションが未設定、あるいは古いコードの初期値（2025年1月）が残っている場合は、強制的に現在の翌月にアップデートする
+if not st.session_state.config or (st.session_state.config.get("year") == 2025 and st.session_state.config.get("month") == 1):
+    st.session_state.config.update({
+        "num_mgr": 2, 
+        "num_regular": 8,
         "staff_names": [f"スタッフ{i+1}" for i in range(10)],
-        "user_shifts": "A,B,C,D,E", "early_shifts": ["A", "B", "C"], "late_shifts": ["D", "E"],
-        "year": default_year, "month": default_month, # 初期値を翌月に固定
+        "user_shifts": "A,B,C,D,E", 
+        "early_shifts": ["A", "B", "C"], 
+        "late_shifts": ["D", "E"],
+        "year": default_year, 
+        "month": default_month,
         "saved_tables": {}
-    }
+    })
 
 # データフレームのセッション永続化用ディクショナリの初期化
 if "dfs" not in st.session_state:
@@ -174,7 +184,7 @@ options = ["", "休", "日"] + s_list
 p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
 
 # --- 【重要】ステート同期・DataFrame完全永続化システム ---
-# 現在の基本設定パラメーターのハッシュ（キー）を生成（「役職」に関する監視キーを完全に撤廃）
+# 現在の基本設定パラメーターのハッシュ（キー）を生成
 current_state_key = (
     tuple(staff_list),
     tuple(days_cols),
@@ -191,8 +201,7 @@ all_keys_exist = all(k in st.session_state for k in required_keys)
 # 構成変更や年月変更が発生した時、または部分的にデータが欠落していた場合に強制自動修復（リビルド）を実行。
 if "last_state_key" not in st.session_state or st.session_state.last_state_key != current_state_key or not all_keys_exist:
     form_names = list(staff_list)
-    
-    # 役職表示のない、元のシンプルな状態のデータフレームで安全に復元
+    # categories（選択肢）を漏れなく確実にパスして初期化
     st.session_state["skill"] = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list), ["○", "△", "×"])
     st.session_state["hols"] = get_persisted_df("hols", pd.DataFrame({"休の総数": [9] * len(staff_list), "公休分": [8] * len(staff_list)}, index=staff_list))
     st.session_state["trainee"] = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=[f"{s}_見習い回数" for s in s_list]))
@@ -713,7 +722,7 @@ with tab_solve:
         status = slv.Solve(model)
 
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("✨ 勤務表の自動作成が完了いたしました。公休、超過勤務が精密に反映されています。")
+            st.success("✨ 勤務作成と調整が完了しました。申し込み（希望）および公休数は最優先で100%厳格に履行されています。")
             res_rows = []
             id_char = {S_OFF: "休", S_NIK: "日", S_CHO: "調", S_NEN: "年"} # 年を追加
             for i, n in enumerate(s_list_extended): id_char[i+1] = n
@@ -797,32 +806,17 @@ with tab_solve:
             st.dataframe(res_df.style.map(cl), use_container_width=True)
             
             # --- 【不具合完全解消】CSVから書式（色）付きExcelエクスポートに変更 ---
-            excel_success = False
-            excel_data = None
-            if openpyxl is not None:
-                try:
-                    towrite = io.BytesIO()
-                    with pd.ExcelWriter(towrite, engine='openpyxl') as writer:
-                        res_df.style.map(cl).to_excel(writer, index=True, sheet_name="Roster")
-                    excel_data = towrite.getvalue()
-                    excel_success = True
-                except Exception:
-                    excel_success = False
+            # メモリ内にExcelデータを書き出し、PatternFill書式を内包させて出力
+            towrite = io.BytesIO()
+            with pd.ExcelWriter(towrite, engine='openpyxl') as writer:
+                res_df.style.map(cl).to_excel(writer, index=True, sheet_name="Roster")
+            excel_data = towrite.getvalue()
 
-            if excel_success and excel_data is not None:
-                st.download_button(
-                    label="📥 Excelファイルでダウンロード",
-                    data=excel_data,
-                    file_name=f"roster_{year}_{month}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.warning("⚠️ Excelエクスポートの実行環境が制限されているため、標準のCSV形式でエクスポートします。")
-                st.download_button(
-                    label="📥 CSVファイルでダウンロード",
-                    data=res_df.to_csv().encode('utf-8-sig'),
-                    file_name=f"roster_{year}_{month}.csv",
-                    mime="text/csv"
-                )
+            st.download_button(
+                label="📥 Excelファイルでダウンロード",
+                data=excel_data,
+                file_name=f"roster_{year}_{month}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
         else: 
             st.error("解が見つかりませんでした。入力制約が競合していないか確認してください。")
