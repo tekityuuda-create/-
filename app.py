@@ -26,11 +26,21 @@ def format_minutes_to_hhmm(minutes):
 st.set_page_config(page_title="AI勤務作成：V80 Ultra Optimizer", page_icon="🛡️", layout="wide")
 
 if 'config' not in st.session_state:
+    # 現在の翌月（年・月）を動的に算出するロジック
+    now = datetime.datetime.now()
+    if now.month == 12:
+        default_year = now.year + 1
+        default_month = 1
+    else:
+        default_year = now.year
+        default_month = now.month + 1
+
     st.session_state.config = {
         "num_mgr": 2, "num_regular": 8,
         "staff_names": [f"スタッフ{i+1}" for i in range(10)],
         "user_shifts": "A,B,C,D,E", "early_shifts": ["A", "B", "C"], "late_shifts": ["D", "E"],
-        "year": 2025, "month": 1, "saved_tables": {}
+        "year": default_year, "month": default_month, # 初期値を翌月に固定
+        "saved_tables": {}
     }
 
 # データフレームのセッション永続化用ディクショナリの初期化
@@ -69,6 +79,7 @@ with st.sidebar:
     w_holiday = st.slider("公休数の厳守度", 0, 100, 80)
 
     st.divider()
+    # 初期値として自動算出された翌年・翌月が自動マッピングされます
     year = int(st.number_input("年", 2024, 2030, st.session_state.config["year"]))
     month = int(st.number_input("月", 1, 12, st.session_state.config["month"]))
 
@@ -162,10 +173,26 @@ days_cols = [f"{d+1}({['月','火','水','木','金','土','日'][calendar.weekd
 options = ["", "休", "日"] + s_list
 p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
 
-# --- 【重要】ステート同期・DataFrame完全永続化システム ---
-# 現在の基本設定パラメーターのハッシュ（キー）を生成（役職の監視を完全に削除）
+# --- 【重要】ステート同期・DataFrame完全永続化＆自動階層ソートシステム ---
+# まず、現在の設定パラメータに基づくスタッフ名リストを取得
+form_names = list(staff_list)
+default_roles = ["管理者"] * n_mgr + ["班長"] * 1 + ["副班長"] * 1
+default_roles.extend(["ベテラン"] * (len(form_names) - len(default_roles)))
+default_roles = default_roles[:len(form_names)]
+
+# セッションから復元、または初期構築（自動ソート処理を完全に撤廃し、ユーザーの入力順を完全に固定）
+names_df_temp = get_persisted_df("names", pd.DataFrame({"スタッフ名": form_names, "役職・経験": default_roles}))
+if "役職・経験" not in names_df_temp.columns:
+    names_df_temp["役職・経験"] = default_roles[:len(names_df_temp)]
+    
+# ソートされた順序でスタッフリストと役割リストを抽出
+staff_list = names_df_temp["スタッフ名"].tolist()
+roles_list_key = names_df_temp["役職・経験"].tolist()
+
+# 構成キーを生成
 current_state_key = (
     tuple(staff_list),
+    tuple(roles_list_key),
     tuple(days_cols),
     tuple(s_list),
     tuple(overtime_s_list),
@@ -180,7 +207,7 @@ all_keys_exist = all(k in st.session_state for k in required_keys)
 # 構成変更や年月変更が発生した時、または部分的にデータが欠落していた場合に強制自動修復（リビルド）を実行。
 if "last_state_key" not in st.session_state or st.session_state.last_state_key != current_state_key or not all_keys_exist:
     form_names = list(staff_list)
-    # 選択肢を漏れなく確実にパスして初期化
+    # 【横スライド排除】「前月末引継ぎ」「今月の申し込み」を転置（行に日付、列にスタッフ）にして初期読み込み
     st.session_state["skill"] = get_persisted_df("skill", pd.DataFrame("○", index=staff_list, columns=s_list), ["○", "△", "×"])
     st.session_state["hols"] = get_persisted_df("hols", pd.DataFrame({"休の総数": [9] * len(staff_list), "公休分": [8] * len(staff_list)}, index=staff_list))
     st.session_state["trainee"] = get_persisted_df("trainee", pd.DataFrame(0, index=staff_list, columns=[f"{s}_見習い回数" for s in s_list]))
@@ -189,11 +216,11 @@ if "last_state_key" not in st.session_state or st.session_state.last_state_key !
     st.session_state["exclude"] = get_persisted_df("exclude", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=s_list))
     st.session_state["overtime"] = get_persisted_df("overtime", pd.DataFrame({"平日超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list], "土曜超過分(分)": [0 if s in ["A","B"] else 30 for s in overtime_s_list]}, index=overtime_s_list))
     st.session_state["designated"] = get_persisted_df("designated", pd.DataFrame(False, index=[d+1 for d in range(n_days)], columns=["指定日"]))
-    st.session_state["names"] = get_persisted_df("names", pd.DataFrame({"スタッフ名": form_names}))
+    st.session_state["names"] = names_df_temp
     
     st.session_state.last_state_key = current_state_key
 
-# --- 3. UIの統合タブ構成（【縦方向スライドも不要】8つのタブに配置） ---
+# --- 3. UIの統合タブ構成（【縦方向スライドも不要】8つのタブへ細分化） ---
 tab_st, tab_ot, tab_skl, tab_hol, tab_prev, tab_req, tab_ex_des, tab_solve = st.tabs([
     "🏗️ 1. 基本構成", 
     "⏱️ 2. 超過時間設定",
@@ -434,6 +461,16 @@ with tab_solve:
         
         w_rhythm = w_mixing
 
+        # 役職・経験レベルの取得とアライメント
+        staff_roles = st.session_state["names"]["役職・経験"].tolist()
+        if len(staff_roles) < total:
+            staff_roles.extend(["ベテラン"] * (total - len(staff_roles)))
+        staff_roles = staff_roles[:total]
+
+        # 役職ごとのインデックス分類
+        novice_indices = [s for s, r in enumerate(staff_roles) if r == "新人"]
+        senior_indices = [s for s, r in enumerate(staff_roles) if r in ["管理者", "班長", "副班長", "ベテラン"]]
+
         # Fシフト用スキル判定関数
         def get_skill_for_F(s_idx):
             skill_c = opt_skill.iloc[s_idx, c_idx]
@@ -511,14 +548,37 @@ with tab_solve:
                         model.Add(s_sum + t_sum + under_std_var == 1)
                         score_objs.append(under_std_var * -100000000)
                     
-                    # 通常日の見習い同日ベテラン出勤保証
+                    # 通常日の見習い同日ベテラン・若手出勤保証（新人の教育制限を適用）
                     for s_t in trainee:
-                        all_skilled_staff = [s for s in range(total) if opt_skill.iloc[s, i] == "○"]
-                        eligible_mentors_on_duty = sum(x[s, d, other_sid] for s in all_skilled_staff for other_sid in range(1, num_types_extended+1))
+                        all_skilled_staff = []
+                        for s in range(total):
+                            if s_name == "F":
+                                is_ok = (get_skill_for_F(s) == "○")
+                            else:
+                                is_ok = (opt_skill.iloc[s, i] == "○")
+                            # 新人（ノバイス）はメンター教育担当から除外
+                            if is_ok and staff_roles[s] != "新人":
+                                all_skilled_staff.append(s)
+                                
+                        young_mentors = [s for s in all_skilled_staff if staff_roles[s] == "若手"]
                         
+                        eligible_mentors_on_duty = sum(x[s, d, other_sid] for s in all_skilled_staff for other_sid in range(1, num_types_extended+1))
                         no_vet_var = model.NewBoolVar(f'no_vet_{s_t}_{d}_{sid}')
                         model.Add(eligible_mentors_on_duty + no_vet_var >= 1).OnlyEnforceIf(x[s_t, d, sid])
                         score_objs.append(no_vet_var * -50000000)
+                        
+                        # 【若手育成推進ボーナス】若手が同行教育を務めた場合の推進加算
+                        if len(young_mentors) > 0:
+                            has_young_mentor = model.NewBoolVar(f'has_young_mentor_on_duty_{s_t}_{d}_{sid}')
+                            young_mentors_on_duty = sum(x[s, d, other_sid] for s in young_mentors for other_sid in range(1, num_types_extended+1))
+                            model.Add(young_mentors_on_duty >= 1).OnlyEnforceIf(has_young_mentor)
+                            model.Add(young_mentors_on_duty == 0).OnlyEnforceIf(has_young_mentor.Not())
+                            
+                            is_young_paired = model.NewBoolVar(f'is_young_paired_{s_t}_{d}_{sid}')
+                            model.AddBoolAnd([x[s_t, d, sid], has_young_mentor]).OnlyEnforceIf(is_young_paired)
+                            model.AddBoolOr([x[s_t, d, sid].Not(), has_young_mentor.Not()]).OnlyEnforceIf(is_young_paired.Not())
+                            
+                            score_objs.append(is_young_paired * 10000)
 
             # 土曜日の見習い同日ベテラン出勤保証
             if wd == 5 and has_C_and_D:
@@ -536,13 +596,39 @@ with tab_solve:
                                 is_ok = (get_skill_for_F(s) == "○")
                             else:
                                 is_ok = (opt_skill.iloc[s, s_list_extended.index(s_name)] == "○")
-                            if is_ok:
+                            if is_ok and staff_roles[s] != "新人":
                                 all_skilled_staff.append(s)
                                 
+                        young_mentors = [s for s in all_skilled_staff if staff_roles[s] == "若手"]
+                        
                         eligible_mentors_on_duty = sum(x[s, d, other_sid] for s in all_skilled_staff for other_sid in range(1, num_types_extended+1))
                         no_vet_var = model.NewBoolVar(f'no_vet_sat_{s_t}_{d}_{sid}')
                         model.Add(eligible_mentors_on_duty + no_vet_var >= 1).OnlyEnforceIf(x[s_t, d, sid])
                         score_objs.append(no_vet_var * -50000000)
+                        
+                        if len(young_mentors) > 0:
+                            has_young_mentor = model.NewBoolVar(f'has_young_mentor_sat_on_duty_{s_t}_{d}_{sid}')
+                            young_mentors_on_duty = sum(x[s, d, other_sid] for s in young_mentors for other_sid in range(1, num_types_extended+1))
+                            model.Add(young_mentors_on_duty >= 1).OnlyEnforceIf(has_young_mentor)
+                            model.Add(young_mentors_on_duty == 0).OnlyEnforceIf(has_young_mentor.Not())
+                            
+                            is_young_paired = model.NewBoolVar(f'is_young_paired_sat_{s_t}_{d}_{sid}')
+                            model.AddBoolAnd([x[s_t, d, sid], has_young_mentor]).OnlyEnforceIf(is_young_paired)
+                            model.AddBoolOr([x[s_t, d, sid].Not(), has_young_mentor.Not()]).OnlyEnforceIf(is_young_paired.Not())
+                            
+                            score_objs.append(is_young_paired * 10000)
+
+            # 【新人同士の組み合わせ不備防止 ＆ 同日監視体制】
+            if len(novice_indices) > 0:
+                novices_on_duty = sum(x[s, d, sid] for s in novice_indices for sid in range(1, num_types_extended+1))
+                model.Add(novices_on_duty <= 2)
+                
+                has_novice_active = model.NewBoolVar(f'has_novice_active_{d}')
+                model.Add(novices_on_duty >= 1).OnlyEnforceIf(has_novice_active)
+                model.Add(novices_on_duty == 0).OnlyEnforceIf(has_novice_active.Not())
+                
+                seniors_on_duty = sum(x[s, d, sid] for s in senior_indices for sid in range(1, num_types_extended+1))
+                model.Add(seniors_on_duty >= 1).OnlyEnforceIf(has_novice_active)
 
             # 1日1人1回 (Hard Constraint)
             for s in range(total): model.Add(sum(x[s, d, i] for i in range(num_types_extended+4)) == 1)
@@ -765,6 +851,7 @@ with tab_solve:
                 final_overtimes.append(final_overtime)
 
             res_df = pd.DataFrame(res_rows, index=staff_list, columns=days_cols)
+            res_df.insert(0, "役職・経験", staff_roles) # 役職表示を左端にマージ
             res_df["休の総数"] = [row.count("休") + row.count("調") + row.count("年") for row in res_rows]
             res_df["年休数(希望)"] = nenkyu_counts
             res_df["設定公休"] = kokyu_values
