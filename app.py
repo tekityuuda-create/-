@@ -38,9 +38,14 @@ else:
     default_year = now.year
     default_month = now.month + 1
 
-# 【自己修復システム】
-# もしセッションが未設定、あるいは古いコードの初期値（2025年1月）が残っている場合は、強制的に現在の翌月にアップデートする
-if not st.session_state.config or (st.session_state.config.get("year") == 2025 and st.session_state.config.get("month") == 1):
+# 【バグ修正：データ保護型自己修復システム】
+# もしセッションが未設定、あるいは古いコードの初期値（2025年1月 かつ テーブル保存データが空）が残っている場合のみ、現在の翌月にアップデートします。
+# これにより、アップロードされたバックアップデータが初期化で消去されることを完全に防ぎ、確実に画面に復元されます。
+if not st.session_state.config or (
+    st.session_state.config.get("year") == 2025 
+    and st.session_state.config.get("month") == 1 
+    and not st.session_state.config.get("saved_tables") # saved_tablesが空（＝アップロードデータではない）の時だけ！
+):
     st.session_state.config.update({
         "num_mgr": 2, 
         "num_regular": 8,
@@ -191,7 +196,7 @@ options = ["", "休", "日"] + s_list
 p_days = ["前月4日前","前月3日前","前月2日前","前月末日"]
 
 # --- 【重要】ステート同期・DataFrame完全永続化システム ---
-# 現在の基本設定パラメーターのハッシュ（キー）を生成（「役職」に関する監視キーを完全に撤廃）
+# 現在の基本設定パラメーターのハッシュ（キー）を生成
 current_state_key = (
     tuple(staff_list),
     tuple(days_cols),
@@ -461,16 +466,6 @@ with tab_solve:
         L_IDS = [s_list_extended.index(x) + 1 for x in late_gr if x in s_list_extended]
         
         w_rhythm = w_mixing
-
-        # 役職・経験レベルの取得とアライメント
-        staff_roles = st.session_state["names"]["役職・経験"].tolist()
-        if len(staff_roles) < total:
-            staff_roles.extend(["ベテラン"] * (total - len(staff_roles)))
-        staff_roles = staff_roles[:total]
-
-        # 役職ごとのインデックス分類
-        novice_indices = [s for s, r in enumerate(staff_roles) if r == "新人"]
-        senior_indices = [s for s, r in enumerate(staff_roles) if r in ["管理者", "班長", "副班長", "ベテラン"]]
 
         # Fシフト用スキル判定関数
         def get_skill_for_F(s_idx):
