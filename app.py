@@ -65,7 +65,7 @@ if "dfs" not in st.session_state:
     st.session_state.dfs = {}
 
 st.title("勤務作成エンジン (Team Excellence Pass)")
-st.info("💡 **リアルタイム自動保存機能**: 骨格（タブ1）を除くすべての入力内容はリアルタイムで自動同期されます。「保存ボタン」を押す手間がなくなり、同期ミスが防止されます。")
+st.info("💡 **操作負荷低減アップデート**: 各タブでの入力時の自動再読み込み（リロード）をすべて廃止しました。入力終了後に「保存する」ボタンを1クリックするだけの静的で快適な動作環境です。")
 
 # --- 2. データのバックアップ・復元管理（サイドバー） ---
 with st.sidebar:
@@ -136,18 +136,15 @@ s_list = [s.strip() for s in raw_s.split(",") if s.strip()]
 early_gr = [x for x in s_list if x in st.session_state.config["early_shifts"]]
 late_gr = [x for x in s_list if x in st.session_state.config["late_shifts"]]
 
-# --- 【解決策1】インデックス・列・曜日ズレを100%吸収する位置ベースの頑健な移植関数 ---
+# --- 【位置ベース】曜日ズレ・非カレンダーテーブル共通高精度復元関数 ---
 def get_persisted_df(key, d_df, categories=None):
     tables = st.session_state.config.get("saved_tables", {})
     if key in tables:
         raw_data = tables.get(key)
         df = pd.DataFrame(raw_data)
         
-        # ターゲットとするd_dfのコピーを作成し、ベースとする
         result_df = d_df.copy()
         
-        # 行数、列数の最小値に基づいて位置（i, j）ベースで安全にセル移植
-        # インデックスラベルの型ズレや例外を物理的に回避する極めて安定した手法
         max_rows = min(len(d_df.index), len(df.index))
         max_cols = min(len(d_df.columns), len(df.columns))
         
@@ -220,7 +217,7 @@ tab_st, tab_ot, tab_skl, tab_hol, tab_prev, tab_req, tab_ex_des, tab_solve = st.
     "🧬 8. AI勤務作成の実行"
 ])
 
-# --- タブ1. 基本構成 (基本構成だけは安全ガードとしてフォームを使用) ---
+# --- タブ1. 基本構成 ---
 with tab_st:
     with st.form("st_form"):
         c1, c2 = st.columns(2)
@@ -253,114 +250,130 @@ with tab_st:
             st.success("基本構成を保存しました。")
             st.rerun()
 
-# --- 【解決策2】タブ2〜7における st.form の完全撤廃（フォームレス・リアルタイム自動同期） ---
-
-# --- タブ2. 担務の超過時間設定 ---
+# --- タブ2. 担務の超過時間設定 (入力時の自動再読み込み完全防止) ---
 with tab_ot:
-    st.subheader("⏱️ 各担務の超過時間設定")
-    st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
-    ed_overtime = st.data_editor(st.session_state["overtime"], use_container_width=True, key=f"overtime_ed_{len(overtime_s_list)}")
-    # リアルタイム同期
-    st.session_state["overtime"] = ed_overtime
-    st.session_state.config["saved_tables"]["overtime"] = ed_overtime.to_dict()
+    with st.form("ot_form"):
+        st.subheader("⏱️ 各担務の超過時間設定")
+        st.write("※日勤、日曜日のすべての担務、土曜日のA・B勤務は、自動的に一律「0分」として処理されます。")
+        ed_overtime = st.data_editor(st.session_state["overtime"], use_container_width=True, key=f"overtime_ed_{len(overtime_s_list)}")
+        submit_ot = st.form_submit_button("⏱️ 超過時間設定を保存する")
+        if submit_ot:
+            st.session_state["overtime"] = ed_overtime
+            st.session_state.config["saved_tables"]["overtime"] = ed_overtime.to_dict()
+            st.success("超過時間設定を保存しました。")
+            st.rerun()
 
-# --- タブ3. 専門スキル ＆ 教育同行設定 ---
+# --- タブ3. 専門スキル ＆ 教育同行設定 (入力時の自動再読み込み完全防止) ---
 with tab_skl:
-    st.subheader("🎓 専門スキル（○:可能, △:見習い, ×:不可）")
-    column_config_skill = {
-        col: st.column_config.SelectboxColumn(
-            col,
-            options=["○", "△", "×"],
-            required=True
+    with st.form("skl_form"):
+        st.subheader("🎓 専門スキル（○:可能, △:見習い, ×:不可）")
+        column_config_skill = {
+            col: st.column_config.SelectboxColumn(
+                col,
+                options=["○", "△", "×"],
+                required=True
+            )
+            for col in s_list
+        }
+        ed_skill = st.data_editor(
+            st.session_state["skill"], 
+            column_config=column_config_skill,
+            use_container_width=True, 
+            key=f"skill_ed_{len(staff_list)}_{len(s_list)}"
         )
-        for col in s_list
-    }
-    ed_skill = st.data_editor(
-        st.session_state["skill"], 
-        column_config=column_config_skill,
-        use_container_width=True, 
-        key=f"skill_ed_{len(staff_list)}_{len(s_list)}"
-    )
-    
-    st.subheader("🏫 教育ノルマ（見習い担当回数の上限）")
-    ed_trainee = st.data_editor(st.session_state["trainee"], use_container_width=True, key=f"trainee_ed_{len(staff_list)}")
-    
-    # リアルタイム同期
-    st.session_state["skill"] = ed_skill
-    st.session_state["trainee"] = ed_trainee
-    st.session_state.config["saved_tables"]["skill"] = ed_skill.to_dict()
-    st.session_state.config["saved_tables"]["trainee"] = ed_trainee.to_dict()
+        
+        st.subheader("🏫 教育ノルマ（見習い担当回数の上限）")
+        ed_trainee = st.data_editor(st.session_state["trainee"], use_container_width=True, key=f"trainee_ed_{len(staff_list)}")
+        submit_skl = st.form_submit_button("🎓 スキル・教育同行設定を保存する")
+        if submit_skl:
+            st.session_state["skill"] = ed_skill
+            st.session_state["trainee"] = ed_trainee
+            st.session_state.config["saved_tables"]["skill"] = ed_skill.to_dict()
+            st.session_state.config["saved_tables"]["trainee"] = ed_trainee.to_dict()
+            st.success("スキル・教育同行設定を保存しました。")
+            st.rerun()
 
-# --- タブ4. 月間休日数設定 ---
+# --- タブ4. 月間休日数設定 (入力時の自動再読み込み完全防止 ＆ 同期エラー完全解決) ---
 with tab_hol:
-    st.subheader("📅 月間休日数設定")
-    ed_hols = st.data_editor(st.session_state["hols"], use_container_width=True, key=f"hols_ed_{len(staff_list)}")
-    
-    # リアルタイム同期（ボタンを押すことなく、変更した瞬間100%確実に同期されます）
-    st.session_state["hols"] = ed_hols
-    st.session_state.config["saved_tables"]["hols"] = ed_hols.to_dict()
+    with st.form("hol_form"):
+        st.subheader("📅 月間休日数設定")
+        ed_hols = st.data_editor(st.session_state["hols"], use_container_width=True, key=f"hols_ed_{len(staff_list)}")
+        submit_hol = st.form_submit_button("📅 休日数設定を保存する")
+        if submit_hol:
+            st.session_state["hols"] = ed_hols
+            st.session_state.config["saved_tables"]["hols"] = ed_hols.to_dict()
+            st.success("休日数設定を保存・同期しました。")
+            st.rerun()
 
-# --- タブ5. 前月末引継ぎ ---
+# --- タブ5. 前月末引継ぎ (入力時の自動再読み込み完全防止) ---
 with tab_prev:
-    st.subheader("🗓️ 前月末引継ぎ")
-    column_config_prev = {
-        col: st.column_config.SelectboxColumn(
-            col,
-            options=["日", "休", "早", "遅"],
-            required=True,
-            width=75
+    with st.form("prev_form"):
+        st.subheader("🗓️ 前月末引継ぎ")
+        column_config_prev = {
+            col: st.column_config.SelectboxColumn(
+                col,
+                options=["日", "休", "早", "遅"],
+                required=True,
+                width=75
+            )
+            for col in p_days
+        }
+        ed_prev = st.data_editor(
+            st.session_state["prev"], 
+            column_config=column_config_prev,
+            use_container_width=True, 
+            key=f"prev_ed_{len(staff_list)}"
         )
-        for col in p_days
-    }
-    ed_prev = st.data_editor(
-        st.session_state["prev"], 
-        column_config=column_config_prev,
-        use_container_width=True, 
-        key=f"prev_ed_{len(staff_list)}"
-    )
-    
-    # リアルタイム同期
-    st.session_state["prev"] = ed_prev
-    st.session_state.config["saved_tables"]["prev"] = ed_prev.to_dict()
+        submit_prev = st.form_submit_button("🗓️ 前月末引継ぎを保存する")
+        if submit_prev:
+            st.session_state["prev"] = ed_prev
+            st.session_state.config["saved_tables"]["prev"] = ed_prev.to_dict()
+            st.success("前月末引継ぎを保存しました。")
+            st.rerun()
 
-# --- タブ6. 今月の申し込み ---
+# --- タブ6. 今月の申し込み (入力時の自動再読み込み完全防止) ---
 with tab_req:
-    st.subheader("📝 今月の申し込み (※「休」は年次休暇として集計します)")
-    column_config_request = {
-        col: st.column_config.SelectboxColumn(
-            col,
-            options=options,
-            required=False,
-            width=45
+    with st.form("request_form"):
+        st.subheader("📝 今月の申し込み (※「休」は年次休暇として集計します)")
+        column_config_request = {
+            col: st.column_config.SelectboxColumn(
+                col,
+                options=options,
+                required=False,
+                width=45
+            )
+            for col in days_cols
+        }
+        ed_req = st.data_editor(
+            st.session_state["request"], 
+            column_config=column_config_request,
+            use_container_width=True, 
+            key=f"request_ed_{len(staff_list)}_{year}_{month}"
         )
-        for col in days_cols
-    }
-    ed_req = st.data_editor(
-        st.session_state["request"], 
-        column_config=column_config_request,
-        use_container_width=True, 
-        key=f"request_ed_{len(staff_list)}_{year}_{month}"
-    )
-    
-    # リアルタイム同期
-    st.session_state["request"] = ed_req
-    st.session_state.config["saved_tables"]["request"] = ed_req.to_dict()
+        submit_req = st.form_submit_button("📝 今月の申し込みを保存する")
+        if submit_req:
+            st.session_state["request"] = ed_req
+            st.session_state.config["saved_tables"]["request"] = ed_req.to_dict()
+            st.success("今月の申し込みを保存しました。")
+            st.rerun()
 
-# --- タブ7. 不要担務・指定日設定 ---
+# --- タブ7. 不要担務・指定日設定 (入力時の自動再読み込み完全防止) ---
 with tab_ex_des:
-    st.subheader("🚫 不要担務 (祝日Cなど)")
-    ed_ex = st.data_editor(st.session_state["exclude"], use_container_width=True, key=f"exclude_ed_{year}_{month}")
-    
-    st.subheader("📌 指定日設定")
-    st.write("※ここでチェックを入れた日は「指定日」となり、A・B勤務の超過分が自動的に「0分」になります。")
-    ed_des = st.data_editor(st.session_state["designated"], use_container_width=True, key=f"designated_ed_{year}_{month}")
-    
-    # リアルタイム同期
-    st.session_state["exclude"] = ed_ex
-    st.session_state["designated"] = ed_des
-    st.session_state.config["saved_tables"]["exclude"] = ed_ex.to_dict()
-    st.session_state.config["saved_tables"]["designated"] = ed_des.to_dict()
-
+    with st.form("ex_des_form"):
+        st.subheader("🚫 不要担務 (祝日Cなど)")
+        ed_ex = st.data_editor(st.session_state["exclude"], use_container_width=True, key=f"exclude_ed_{year}_{month}")
+        
+        st.subheader("📌 指定日設定")
+        st.write("※ここでチェックを入れた日は「指定日」となり、A・B勤務の超過分が自動的に「0分」になります。")
+        ed_des = st.data_editor(st.session_state["designated"], use_container_width=True, key=f"designated_ed_{year}_{month}")
+        submit_ex_des = st.form_submit_button("🚫 不要担務・指定日設定を保存する")
+        if submit_ex_des:
+            st.session_state["exclude"] = ed_ex
+            st.session_state["designated"] = ed_des
+            st.session_state.config["saved_tables"]["exclude"] = ed_ex.to_dict()
+            st.session_state.config["saved_tables"]["designated"] = ed_des.to_dict()
+            st.success("不要担務・指定日設定を保存しました。")
+            st.rerun()
 
 # --- 最適化インプットデータの最新同期取得 ---
 opt_skill = st.session_state["skill"]
@@ -377,8 +390,8 @@ with tab_solve:
     debug_rows = []
     for s_idx, s_name in enumerate(staff_list):
         req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s_idx, di] == "休")
-        total_h = int(opt_hols.iloc[s_idx, 0])  # 休の総数（同期された最新値）
-        kokyu_h = int(opt_hols.iloc[s_idx, 1])  # 公休分（同期された最新値）
+        total_h = int(opt_hols.iloc[s_idx, 0])
+        kokyu_h = int(opt_hols.iloc[s_idx, 1])
         debug_rows.append({
             "スタッフ名": s_name,
             "休の総数(設定)": total_h,
@@ -414,7 +427,6 @@ with tab_solve:
     )
 
     if st.button("🚀 AIによる勤務作成 (最高解モード)"):
-        # プログレスバーによる視覚的フェーズフィードバック
         progress_bar = st.progress(10, text="エンジンの初期化中...")
         
         model = cp_model.CpModel()
@@ -437,7 +449,6 @@ with tab_solve:
         E_IDS = [s_list_extended.index(x) + 1 for x in early_gr if x in s_list_extended]
         L_IDS = [s_list_extended.index(x) + 1 for x in late_gr if x in s_list_extended]
         
-        # 戦略プリセットによるウェイトの自動調整
         if "⚖️" in strategy_mode:
             current_w_h_rule = w_h_rule
             current_w_rhythm = w_mixing
@@ -618,7 +629,6 @@ with tab_solve:
                 
                 daily_overtime_exprs.append(sum(terms))
 
-            # 【調整休働き溜めルールのソフト化】
             for d in range(n_days):
                 cum_overtime = sum(daily_overtime_exprs[k] for k in range(d + 1))
                 cum_cho_count = sum(x[s, k, S_CHO] for k in range(d + 1))
@@ -665,10 +675,9 @@ with tab_solve:
                         nik_var = x[s, di, S_NIK]
                         score_objs.append(nik_var * -10000000)
 
-            # 【個別公休・調整休数のソフト化（最新の同期値を厳密に参照）】
             req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s, di] == "休")
-            total_off_limit = int(opt_hols.iloc[s, 0])  # 最新の同期値
-            kokyu_val = int(opt_hols.iloc[s, 1])        # 最新の同期値
+            total_off_limit = int(opt_hols.iloc[s, 0])
+            kokyu_val = int(opt_hols.iloc[s, 1])
             
             target_cho_count = total_off_limit - kokyu_val
             if target_cho_count < 0:
@@ -740,7 +749,7 @@ with tab_solve:
             res_df = pd.DataFrame(res_rows, index=staff_list, columns=days_cols)
             st.session_state["raw_schedule"] = res_df
 
-            # 【自動作成結果を履歴管理（セーブポイント）へスタック】
+            # 【自動作成結果を履歴管理へ保存】
             new_hist_entry = {
                 "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
                 "label": f"AI自動作成 ({strategy_mode})",
@@ -753,41 +762,46 @@ with tab_solve:
         else: 
             st.error("解が見つかりませんでした。入力制約が競合していないか確認してください。")
 
-    # --- 4. 手動微調整 ＆ リアルタイム整合性検証システム ---
+    # --- 4. 手動微調整 ＆ リアルタイム整合性検証システム (入力途中のリロードを完全に防止する設計) ---
     if "raw_schedule" in st.session_state:
         st.divider()
         st.subheader("✍️ AI勤務表の手動微調整 ＆ リアルタイム検証")
-        st.info("💡 下記の勤務表内のセルをダブルクリックして値を直接変更できます。手動修正は即座に下部の検証パネルおよび超過時間の統計へ再反映されます。")
+        st.info("💡 下記の勤務スケジュールを書き換えた後、下部の「💾 手動調整を適用して再計算」ボタンを押してください。編集のたびに画面全体がフラッシュリロードする現象は完全に解消されています。")
         
-        column_config_edit = {
-            col: st.column_config.SelectboxColumn(
-                col,
-                options=options,
-                required=True,
-                width=45
+        # 編集用のフォーム
+        with st.form("manual_edit_form"):
+            column_config_edit = {
+                col: st.column_config.SelectboxColumn(
+                    col,
+                    options=options,
+                    required=True,
+                    width=45
+                )
+                for col in days_cols
+            }
+            
+            # フォーム内に配置することで、フォーカスアウト時の不要な自動リロードを遮断
+            edited_raw_df = st.data_editor(
+                st.session_state["raw_schedule"],
+                column_config=column_config_edit,
+                use_container_width=True,
+                key=f"schedule_editor_v3_{year}_{month}"
             )
-            for col in days_cols
-        }
-        
-        # ユーザーによる直接編集エディタ
-        edited_raw_df = st.data_editor(
-            st.session_state["raw_schedule"],
-            column_config=column_config_edit,
-            use_container_width=True,
-            key=f"schedule_editor_v3_{year}_{month}"
-        )
-        
-        # セッション同期
-        st.session_state["raw_schedule"] = edited_raw_df
+            
+            submit_manual = st.form_submit_button("💾 手動調整を適用して再計算する")
+            if submit_manual:
+                st.session_state["raw_schedule"] = edited_raw_df
+                st.success("手動調整を反映し、超過勤務や各種警告を再集計しました。")
+                st.rerun()
 
-        # 【手動調整状態の個別セーブポイント保存ボタン】
+        # 【個別セーブポイント保存ボタン】
         if st.button("💾 現在の調整版をセーブポイント（履歴）として保存"):
             new_hist_entry = {
                 "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
                 "label": "ユーザー手動調整版",
-                "df": edited_raw_df.copy()
+                "df": st.session_state["raw_schedule"].copy()
             }
-            if not st.session_state["roster_history"] or not st.session_state["roster_history"][-1]["df"].equals(edited_raw_df):
+            if not st.session_state["roster_history"] or not st.session_state["roster_history"][-1]["df"].equals(st.session_state["raw_schedule"]):
                 st.session_state["roster_history"].append(new_hist_entry)
                 if len(st.session_state["roster_history"]) > 5:
                     st.session_state["roster_history"].pop(0)
@@ -804,8 +818,11 @@ with tab_solve:
         hols_mismatch_count = 0
         overtime_limits_exceeded = 0
 
+        # 最新の確定（保存）済みスケジュールをベースに評価
+        saved_schedule = st.session_state["raw_schedule"]
+
         for si, s_name in enumerate(staff_list):
-            row_shifts = edited_raw_df.iloc[si].tolist()
+            row_shifts = saved_schedule.iloc[si].tolist()
             
             # (a) 休日数の整合性検証（最新の同期値を厳密に参照）
             n_off = row_shifts.count("休")
@@ -923,7 +940,7 @@ with tab_solve:
         compliance_score = max(0, 100 - deduction)
 
         stats_df = pd.DataFrame(rec_rows, index=staff_list)
-        final_display_df = pd.concat([edited_raw_df, stats_df], axis=1)
+        final_display_df = pd.concat([saved_schedule, stats_df], axis=1)
 
         # 労務健全度スコアリングカードのダッシュボード表示
         st.subheader("🛡️ 労務コンプライアンス ＆ 整合性ダッシュボード")
