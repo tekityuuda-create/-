@@ -250,7 +250,7 @@ with tab_st:
             st.success("基本構成を保存しました。")
             st.rerun()
 
-# --- タブ2. 担務の超過時間設定 (入力時の自動再読み込み完全防止) ---
+# --- タブ2. 担務の超過時間設定 ---
 with tab_ot:
     with st.form("ot_form"):
         st.subheader("⏱️ 各担務の超過時間設定")
@@ -263,7 +263,7 @@ with tab_ot:
             st.success("超過時間設定を保存しました。")
             st.rerun()
 
-# --- タブ3. 専門スキル ＆ 教育同行設定 (入力時の自動再読み込み完全防止) ---
+# --- タブ3. 専門スキル ＆ 教育同行設定 ---
 with tab_skl:
     with st.form("skl_form"):
         st.subheader("🎓 専門スキル（○:可能, △:見習い, ×:不可）")
@@ -293,7 +293,7 @@ with tab_skl:
             st.success("スキル・教育同行設定を保存しました。")
             st.rerun()
 
-# --- タブ4. 月間休日数設定 (入力時の自動再読み込み完全防止 ＆ 同期エラー完全解決) ---
+# --- タブ4. 月間休日数設定 ---
 with tab_hol:
     with st.form("hol_form"):
         st.subheader("📅 月間休日数設定")
@@ -305,7 +305,7 @@ with tab_hol:
             st.success("休日数設定を保存・同期しました。")
             st.rerun()
 
-# --- タブ5. 前月末引継ぎ (入力時の自動再読み込み完全防止) ---
+# --- タブ5. 前月末引継ぎ ---
 with tab_prev:
     with st.form("prev_form"):
         st.subheader("🗓️ 前月末引継ぎ")
@@ -331,7 +331,7 @@ with tab_prev:
             st.success("前月末引継ぎを保存しました。")
             st.rerun()
 
-# --- タブ6. 今月の申し込み (入力時の自動再読み込み完全防止) ---
+# --- タブ6. 今月の申し込み ---
 with tab_req:
     with st.form("request_form"):
         st.subheader("📝 今月の申し込み (※「休」は年次休暇として集計します)")
@@ -357,7 +357,7 @@ with tab_req:
             st.success("今月の申し込みを保存しました。")
             st.rerun()
 
-# --- タブ7. 不要担務・指定日設定 (入力時の自動再読み込み完全防止) ---
+# --- タブ7. 不要担務・指定日設定 ---
 with tab_ex_des:
     with st.form("ex_des_form"):
         st.subheader("🚫 不要担務 (祝日Cなど)")
@@ -390,14 +390,22 @@ with tab_solve:
     debug_rows = []
     for s_idx, s_name in enumerate(staff_list):
         req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s_idx, di] == "休")
-        total_h = int(opt_hols.iloc[s_idx, 0])
-        kokyu_h = int(opt_hols.iloc[s_idx, 1])
+        total_h = int(opt_hols.iloc[s_idx, 0])  # 休の総数（設定値）
+        kokyu_h = int(opt_hols.iloc[s_idx, 1])  # 公休分（設定値）
+        
+        # 【新割当ルールに基づく表示検証】
+        max_cho_capacity = total_h - kokyu_h
+        expected_cho = max(0, max_cho_capacity)
+        expected_nen = max(0, req_off_count - expected_cho)
+        expected_total = kokyu_h + expected_cho + expected_nen
+        
         debug_rows.append({
             "スタッフ名": s_name,
-            "休の総数(設定)": total_h,
-            "公休分(設定)": kokyu_h,
-            "年次休暇(希望休)数": req_off_count,
-            "最終休み目標(総数)": total_h + req_off_count
+            "公休(休)目標": kokyu_h,
+            "調整休(調)目標": expected_cho,
+            "追加年休(年)目標": expected_nen,
+            "希望休(申し込み)数": req_off_count,
+            "最終休み目標(総数)": expected_total
         })
     st.dataframe(pd.DataFrame(debug_rows), use_container_width=True)
 
@@ -584,13 +592,19 @@ with tab_solve:
                         skill_val = opt_skill.iloc[s, i]
                     if skill_val == "×": model.Add(x[s, d, i+1] == 0)
 
+                # --- 申し込み（希望）の反映モデル（新休日割当ルール対応） ---
                 req = opt_req.iloc[s, d]
-                c_map = {"休": S_NEN, "日": S_NIK, "": -1}
+                c_map = {"日": S_NIK, "": -1}
                 for i, n in enumerate(s_list_extended): c_map[n] = i+1
-                if req in c_map and req != "": 
+                
+                if req == "休":
+                    # 希望休の日は、公休、調整休、年休のいずれか（とにかく休みであれば何でも良い）
+                    model.Add(x[s, d, S_OFF] + x[s, d, S_CHO] + x[s, d, S_NEN] == 1)
+                elif req in c_map and req != "": 
                     model.Add(x[s, d, c_map[req]] == 1)
                 
                 if req != "休":
+                    # 希望休ではない日には、年休（S_NEN）が勝手に割り当てられないように制限
                     model.Add(x[s, d, S_NEN] == 0)
 
                 if d < n_days - 1:
@@ -675,16 +689,22 @@ with tab_solve:
                         nik_var = x[s, di, S_NIK]
                         score_objs.append(nik_var * -10000000)
 
+            # --- 【新休日割当ルールに基づく制約設計】 ---
             req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s, di] == "休")
             total_off_limit = int(opt_hols.iloc[s, 0])
             kokyu_val = int(opt_hols.iloc[s, 1])
             
-            target_cho_count = total_off_limit - kokyu_val
-            if target_cho_count < 0:
-                target_cho_count = 0
+            # 調整休の上限（枠数） = 総数 - 公休
+            max_cho_capacity = total_off_limit - kokyu_val
+            expected_cho = max(0, max_cho_capacity)
+            
+            # 調整休枠で消費しきれず、はみ出た分だけを「年休」として上乗せする
+            expected_nen = max(0, req_off_count - expected_cho)
 
-            model.Add(sum(x[s, d, S_NEN] for d in range(n_days)) == req_off_count)
+            # 年休（年）＝ 枠からあふれた残余分のみを厳格に固定
+            model.Add(sum(x[s, d, S_NEN] for d in range(n_days)) == expected_nen)
 
+            # 公休（休）＝ 設定公休分にソフト等和設定
             off_slack_plus = model.NewIntVar(0, n_days, f'off_sp_{s}')
             off_slack_minus = model.NewIntVar(0, n_days, f'off_sm_{s}')
             model.Add(sum(x[s, d, S_OFF] for d in range(n_days)) + off_slack_plus - off_slack_minus == kokyu_val)
@@ -692,9 +712,10 @@ with tab_solve:
             score_objs.append(off_slack_minus * -10000000)
             off_discrepancies.append((s, "公休数", off_slack_plus, off_slack_minus))
 
+            # 調整休（調）＝ 調整休枠数にソフト等和設定
             cho_slack_plus = model.NewIntVar(0, n_days, f'cho_sp_{s}')
             cho_slack_minus = model.NewIntVar(0, n_days, f'cho_sm_{s}')
-            model.Add(sum(x[s, d, S_CHO] for d in range(n_days)) + cho_slack_plus - cho_slack_minus == target_cho_count)
+            model.Add(sum(x[s, d, S_CHO] for d in range(n_days)) + cho_slack_plus - cho_slack_minus == expected_cho)
             score_objs.append(cho_slack_plus * -10000000)
             score_objs.append(cho_slack_minus * -10000000)
             off_discrepancies.append((s, "調整休数", cho_slack_plus, cho_slack_minus))
@@ -824,7 +845,7 @@ with tab_solve:
         for si, s_name in enumerate(staff_list):
             row_shifts = saved_schedule.iloc[si].tolist()
             
-            # (a) 休日数の整合性検証（最新の同期値を厳密に参照）
+            # (a) 休日数の整合性検証（新休日割当ルールに完全準拠）
             n_off = row_shifts.count("休")
             n_cho = row_shifts.count("調")
             n_nen = row_shifts.count("年")
@@ -833,16 +854,24 @@ with tab_solve:
             total_h_target = int(opt_hols.iloc[si, 0])
             kokyu_target = int(opt_hols.iloc[si, 1])
             req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[si, di] == "休")
-            target_off_total = total_h_target + req_off_count
             
-            if total_off_actual != target_off_total:
-                validation_alerts.append(f"⚠️ **{s_name}**: 休日合計が一致しません（目標: {target_off_total}日、手動修正後: {total_off_actual}日）")
+            max_cho_capacity = total_h_target - kokyu_target
+            expected_cho = max(0, max_cho_capacity)
+            expected_nen = max(0, req_off_count - expected_cho)
+            expected_off = kokyu_target
+            expected_total_off = expected_off + expected_cho + expected_nen
+            
+            if total_off_actual != expected_total_off:
+                validation_alerts.append(f"⚠️ **{s_name}**: 休日合計が一致しません（目標: {expected_total_off}日、手動修正後: {total_off_actual}日）")
                 hols_mismatch_count += 1
-            if n_off != kokyu_target:
-                validation_alerts.append(f"⚠️ **{s_name}**: 公休「休」の数が設定と異なります（設定公休: {kokyu_target}日、手動修正後: {n_off}日）")
+            if n_off != expected_off:
+                validation_alerts.append(f"⚠️ **{s_name}**: 公休「休」の数が設定と異なります（目標公休: {expected_off}日、手動修正後: {n_off}日）")
                 hols_mismatch_count += 1
-            if n_nen != req_off_count:
-                validation_alerts.append(f"⚠️ **{s_name}**: 年休「年」の数が希望数と異なります（希望年休: {req_off_count}日、手動修正後: {n_nen}日）")
+            if n_cho != expected_cho:
+                validation_alerts.append(f"⚠️ **{s_name}**: 調整休「調」の数が設定と異なります（目標調整休: {expected_cho}日、手動修正後: {n_cho}日）")
+                hols_mismatch_count += 1
+            if n_nen != expected_nen:
+                validation_alerts.append(f"⚠️ **{s_name}**: 年休「年」の数が期待値と異なります（目標年休: {expected_nen}日、手動修正後: {n_nen}日）")
                 hols_mismatch_count += 1
                 
             # (b) 5連勤以上の検出
