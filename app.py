@@ -390,10 +390,10 @@ with tab_solve:
     debug_rows = []
     for s_idx, s_name in enumerate(staff_list):
         req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s_idx, di] == "休")
-        total_h = int(opt_hols.iloc[s_idx, 0])  # 休の総数（設定値）
-        kokyu_h = int(opt_hols.iloc[s_idx, 1])  # 公休分（設定値）
+        total_h = int(opt_hols.iloc[s_idx, 0])
+        kokyu_h = int(opt_hols.iloc[s_idx, 1])
         
-        # 【新割当ルールに基づく表示検証】
+        # 調整休枠の上限
         max_cho_capacity = total_h - kokyu_h
         expected_cho = max(0, max_cho_capacity)
         expected_nen = max(0, req_off_count - expected_cho)
@@ -578,6 +578,24 @@ with tab_solve:
             is_off = [model.NewBoolVar(f'io_{s}_{d}') for d in range(n_days)]
             daily_overtime_exprs = []
             
+            # --- 【新規追加】Fシフト前後の遷移に関するハード制約定義 ---
+            if "F" in s_list_extended:
+                f_sid = s_list_extended.index("F") + 1
+                
+                # 1. 前月最終日（前月末日）が「遅」の場合、当月1日目の F を完全排除（禁止）
+                last_prev_val = opt_prev.iloc[s, 3] # 前月末日
+                if last_prev_val == "遅":
+                    model.Add(x[s, 0, f_sid] == 0)
+                
+                # 2. 月内の F の前後遷移制限（ハード制約）
+                for d in range(n_days):
+                    # F の翌日(d+1) に 早番グループ を完全禁止
+                    if d < n_days - 1:
+                        model.Add(x[s, d, f_sid] + sum(x[s, d+1, ei] for ei in E_IDS) <= 1)
+                    # F の前日(d-1) に 遅番グループ を完全禁止
+                    if d > 0:
+                        model.Add(sum(x[s, d-1, li] for li in L_IDS) + x[s, d, f_sid] <= 1)
+
             for d in range(n_days):
                 model.Add(is_off[d] == x[s, d, S_OFF] + x[s, d, S_CHO] + x[s, d, S_NEN])
                 model.Add(sum(x[s, d, i] for i in E_IDS) == 1).OnlyEnforceIf(is_early[d])
@@ -592,19 +610,17 @@ with tab_solve:
                         skill_val = opt_skill.iloc[s, i]
                     if skill_val == "×": model.Add(x[s, d, i+1] == 0)
 
-                # --- 申し込み（希望）の反映モデル（新休日割当ルール対応） ---
+                # 申し込み（希望）の反映モデル
                 req = opt_req.iloc[s, d]
                 c_map = {"日": S_NIK, "": -1}
                 for i, n in enumerate(s_list_extended): c_map[n] = i+1
                 
                 if req == "休":
-                    # 希望休の日は、公休、調整休、年休のいずれか（とにかく休みであれば何でも良い）
                     model.Add(x[s, d, S_OFF] + x[s, d, S_CHO] + x[s, d, S_NEN] == 1)
                 elif req in c_map and req != "": 
                     model.Add(x[s, d, c_map[req]] == 1)
                 
                 if req != "休":
-                    # 希望休ではない日には、年休（S_NEN）が勝手に割り当てられないように制限
                     model.Add(x[s, d, S_NEN] == 0)
 
                 if d < n_days - 1:
@@ -689,22 +705,17 @@ with tab_solve:
                         nik_var = x[s, di, S_NIK]
                         score_objs.append(nik_var * -10000000)
 
-            # --- 【新休日割当ルールに基づく制約設計】 ---
+            # 新休日割当ルール
             req_off_count = sum(1 for di in range(n_days) if opt_req.iloc[s, di] == "休")
             total_off_limit = int(opt_hols.iloc[s, 0])
             kokyu_val = int(opt_hols.iloc[s, 1])
             
-            # 調整休の上限（枠数） = 総数 - 公休
             max_cho_capacity = total_off_limit - kokyu_val
             expected_cho = max(0, max_cho_capacity)
-            
-            # 調整休枠で消費しきれず、はみ出た分だけを「年休」として上乗せする
             expected_nen = max(0, req_off_count - expected_cho)
 
-            # 年休（年）＝ 枠からあふれた残余分のみを厳格に固定
             model.Add(sum(x[s, d, S_NEN] for d in range(n_days)) == expected_nen)
 
-            # 公休（休）＝ 設定公休分にソフト等和設定
             off_slack_plus = model.NewIntVar(0, n_days, f'off_sp_{s}')
             off_slack_minus = model.NewIntVar(0, n_days, f'off_sm_{s}')
             model.Add(sum(x[s, d, S_OFF] for d in range(n_days)) + off_slack_plus - off_slack_minus == kokyu_val)
@@ -712,7 +723,6 @@ with tab_solve:
             score_objs.append(off_slack_minus * -10000000)
             off_discrepancies.append((s, "公休数", off_slack_plus, off_slack_minus))
 
-            # 調整休（調）＝ 調整休枠数にソフト等和設定
             cho_slack_plus = model.NewIntVar(0, n_days, f'cho_sp_{s}')
             cho_slack_minus = model.NewIntVar(0, n_days, f'cho_sm_{s}')
             model.Add(sum(x[s, d, S_CHO] for d in range(n_days)) + cho_slack_plus - cho_slack_minus == expected_cho)
@@ -783,7 +793,7 @@ with tab_solve:
         else: 
             st.error("解が見つかりませんでした。入力制約が競合していないか確認してください。")
 
-    # --- 4. 手動微調整 ＆ リアルタイム整合性検証システム (入力途中のリロードを完全に防止する設計) ---
+    # --- 4. 手動微調整 ＆ リアルタイム整合性検証システム ---
     if "raw_schedule" in st.session_state:
         st.divider()
         st.subheader("✍️ AI勤務表の手動微調整 ＆ リアルタイム検証")
@@ -801,7 +811,6 @@ with tab_solve:
                 for col in days_cols
             }
             
-            # フォーム内に配置することで、フォーカスアウト時の不要な自動リロードを遮断
             edited_raw_df = st.data_editor(
                 st.session_state["raw_schedule"],
                 column_config=column_config_edit,
@@ -845,7 +854,7 @@ with tab_solve:
         for si, s_name in enumerate(staff_list):
             row_shifts = saved_schedule.iloc[si].tolist()
             
-            # (a) 休日数の整合性検証（新休日割当ルールに完全準拠）
+            # (a) 休日数の整合性検証
             n_off = row_shifts.count("休")
             n_cho = row_shifts.count("調")
             n_nen = row_shifts.count("年")
@@ -894,10 +903,12 @@ with tab_solve:
                 validation_alerts.append(f"🚨 **{s_name}**: **{max_consecutive}連勤**が発生しています（上限4連勤のルール違反）")
                 consecutive_rules_broken += 1
                 
-            # (c) 遅早シフトパターン検証
+            # (c) 遅早シフトパターン検証 ＆ 【新規】Fシフト前後の遷移パターンチェック
             last_prev_shift = opt_prev.iloc[si, 3]
             for di in range(n_days):
                 today_shift = row_shifts[di]
+                
+                # 通常の遅早チェック
                 if di == 0:
                     prev_is_late = (last_prev_shift == "遅")
                 else:
@@ -910,6 +921,22 @@ with tab_solve:
                     day_str = f"前月末日〜1日" if di == 0 else f"{di}日〜{di+1}日"
                     validation_alerts.append(f"🚨 **{s_name}**: 遅番の翌日に早番が割り当てられています（{day_str}）")
                     pattern_rules_broken += 1
+
+                # 【新規】Fシフト前後のルール検証（手動バリデーション）
+                if today_shift == "F":
+                    # Fの前日に「遅番」が入っている場合の検出
+                    if prev_is_late:
+                        day_str = "前月末日〜1日" if di == 0 else f"{di}日〜{di+1}日"
+                        validation_alerts.append(f"🚨 **{s_name}**: 遅番の翌日にF勤務が割り当てられています（{day_str}）")
+                        pattern_rules_broken += 1
+                    
+                    # Fの翌日に「早番」が入っている場合の検出
+                    if di < n_days - 1:
+                        next_shift = row_shifts[di+1]
+                        next_is_early = (next_shift in early_gr)
+                        if next_is_early:
+                            validation_alerts.append(f"🚨 **{s_name}**: F勤務の翌日に早番が割り当てられています（{di+1}日〜{di+2}日）")
+                            pattern_rules_broken += 1
 
             # (d) 超過勤務時間の再集計
             staff_overtime_sum = 0
@@ -945,7 +972,7 @@ with tab_solve:
             minus_val = n_cho * 445
             final_overtime = staff_overtime_sum - minus_val
             
-            # 36協定チェック：時間外労働が45時間（2700分）を超えているか
+            # 36協定チェック
             if final_overtime > 2700:
                 validation_alerts.append(f"⚠️ **36協定アラート**: **{s_name}**の精算後超過勤務が45時間を超過しています（{format_minutes_to_hhmm(final_overtime)}）")
                 overtime_limits_exceeded += 1
@@ -978,7 +1005,7 @@ with tab_solve:
             st.metric("労務健全度スコア", f"{compliance_score} / 100 点", delta=f"-{deduction}点" if deduction > 0 else "減点なし")
         with c_detail:
             st.write("**現在の勤務表におけるルール評価統計:**")
-            st.write(f"- 連勤制限違反数: **{consecutive_rules_broken}件** | 遅早パターン違反数: **{pattern_rules_broken}件**")
+            st.write(f"- 連勤制限違反数: **{consecutive_rules_broken}件** | 遅早・Fシフト遷移違反数: **{pattern_rules_broken}件**")
             st.write(f"- 設定休日ミスマッチ: **{hols_mismatch_count}件** | 36協定上限（45時間）超過者数: **{overtime_limits_exceeded}人**")
 
         if validation_alerts:
